@@ -7,8 +7,8 @@
 #define cbi(port,bit) \
   (port) &= ~(1 << (bit))
 
-const float Ts = 1.0 / 750; // 750 Hz
-const uint8_t interruptCounter = round(Ts * 32e3);
+const float Ts = 1.0 / 781.25; // 781.25 Hz
+const uint8_t interruptCounter = round(Ts * 8e6 / 256);
 
 void setupADC() {
   cli();
@@ -45,7 +45,7 @@ void setupPWM() {
   sbi(TCCR0A, WGM01);
   sbi(TCCR0A, WGM00); 
 
-  // Prescaler /1
+  // Prescaler /1 → 8 MHz / 256 / 1 = 31.25 kHz
   cbi(TCCR0B, CS02); // 11-6 Clock Select Bit Description
   cbi(TCCR0B, CS01); 
   sbi(TCCR0B, CS00);
@@ -80,6 +80,7 @@ int main() {
   setupADC();
   sbi(TIMSK, TOIE0); // Enable timer 0 overflow interrupt
   sbi(DDRB, 0); // pin 0 output
+  sbi(DDRB, 2); // pin 2 output
   while(true) {
     loop();
   }  
@@ -108,11 +109,12 @@ void updateController(int16_t adcval) {
     Ts,
   };
 
-  if (counter++ >= 10) {
+  if (counter++ >= 0) {
     counter = 0;
   }
   if (counter == 0) {
-    pid.set(pgm_read_byte(signal + index) * 4);
+    uint16_t newSetPoint = pgm_read_byte(signal + index) * 4;
+    pid.setpoint = newSetPoint;
     index++;
     if (index == len)
       index = 0;
@@ -120,8 +122,8 @@ void updateController(int16_t adcval) {
   
   hyst.update(ema(adcval));
   
-  uint16_t output = hyst.getValue() << 2;
-  int16_t control = pid.update(output);
+  uint16_t position = hyst.getValue() << 2;
+  int16_t control = pid.update(position);
 
 #if 1
   if (control >= 0)
@@ -154,5 +156,3 @@ ISR(ADC_vect) {
   uint8_t low = ADCL;
   adcval = ((uint16_t)ADCH << 8) | low;
 }
-
-
