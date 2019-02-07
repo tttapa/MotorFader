@@ -87,6 +87,7 @@ int main() {
 }
 
 volatile int16_t adcval = -1;
+volatile bool touched = false;
 
 const int16_t knee = 50;
 
@@ -98,7 +99,7 @@ uint8_t activation(int16_t val) {
 }
 
 void updateController(int16_t adcval) {
-  static EMA_f ema = 0.75;
+  static EMA_f ema = 0.85;
   static Hysteresis<2> hyst;
   static uint8_t counter = 0;
   static size_t index = 0;
@@ -109,7 +110,7 @@ void updateController(int16_t adcval) {
     Ts,
   };
 
-  if (counter++ >= 0) {
+  if (counter++ >= 8) {
     counter = 0;
   }
   if (counter == 0) {
@@ -126,7 +127,9 @@ void updateController(int16_t adcval) {
   int16_t control = pid.update(position);
 
 #if 1
-  if (control >= 0)
+  if (touched)
+    motorForward(0);
+  else if (control >= 0)
     motorForward(activation(control));
   else
     motorBackward(activation(-control));
@@ -148,6 +151,23 @@ ISR(TIMER0_OVF_vect) {
   if (counter > interruptCounter) {
     counter = 0;
     sbi(ADCSRA, ADEN); // enable ADC
+  }
+  static uint8_t touchcounter = 0;
+  if ((DDRB & _BV(2)) == 0) { // pin 2 is input
+    if ((PINB & _BV(2)) != 0) { // pin 2 is high
+      touched = touchcounter > 4;
+      if (touchcounter > 4)
+        sbi(PORTB, 0); // turn on pin 0
+      else 
+        cbi(PORTB, 0);
+      // cbi(PORTB, 2); // turn off internal pull-up
+      sbi(DDRB, 2); // output mode, start discharging
+    }
+    touchcounter++;
+  } else { // pin 2 is output
+    cbi(DDRB, 2); // input mode
+    touchcounter = 0;
+    // sbi(PORTB, 2); // turn on internal pull-up
   }
 }
 
