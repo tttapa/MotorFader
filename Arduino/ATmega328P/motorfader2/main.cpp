@@ -13,14 +13,14 @@
 
 // ------------------------------ Description ------------------------------- //
 
-// This sketch drives a motorized fader using a PID controller. It follows a 
+// This sketch drives a motorized fader using a PID controller. It follows a
 // reference trajectory defined in `Reference.hpp`. The motor is disabled when
 // the user touches the knob of the fader.
 //
-// Everything is driven by Timer0, which runs (by default) at a rate of 
+// Everything is driven by Timer0, which runs (by default) at a rate of
 // 31.250 kHz. This high rate is used to eliminate audible tones from the PWM
-// drive for the motor. 
-// Every 30 periods of Timer0 (960 µs), the analog input is sampled, and 
+// drive for the motor.
+// Every 30 periods of Timer0 (960 µs), the analog input is sampled, and
 // this causes the PID control loop to run in the main loop function.
 // Capacitive sensing is implemented by measuring the RC time on the touch pin
 // in the Timer0 interrupt handler. The “touched” status is sticky for >20 ms
@@ -34,7 +34,8 @@
 // D5:  input 2A of L293D dual H-bridge  (OC0B)
 // D13: scope to monitor timing          (PB5)
 //
-// Connect the outer connections of the potentiometer to ground and Vcc.
+// Connect the outer connections of the potentiometer to ground and Vcc, it's 
+// recommended to add a 100 nF capacitor between the wiper and ground.
 // Connect the 1,2EN enable pin of the L293D to Vcc.
 // Connect a 500kΩ pull-up resistor between pin D2 and Vcc.
 
@@ -107,11 +108,11 @@ int main() {
 
 // The main PID controller. Needs tuning for your specific setup:
 PID controller = {
-    4,       // Kp: proportional gain
-    11,      // Ki: integral gain
-    -2.8e-2, // Kd: derivative gain
-    Ts,      // Ts: sampling time
-    40,      // fc: cutoff frequency of derivative filter (Hz), zero to disable
+    4,      // Kp: proportional gain
+    11,     // Ki: integral gain
+    -0.028, // Kd: derivative gain
+    Ts,     // Ts: sampling time
+    40,     // fc: cutoff frequency of derivative filter (Hz), zero to disable
 };
 
 // Activation function converts controller output to a PWM duty cycle (0-255)
