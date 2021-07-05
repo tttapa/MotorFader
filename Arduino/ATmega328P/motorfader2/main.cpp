@@ -5,11 +5,26 @@
 // Configuration of PWM and Timer0 for driving the motor:
 #include "Motor.hpp"
 // Reference signal for testing the performance of the controller:
-#include "Reference.h"
+#include "Reference.hpp"
 // Helpers for low-level AVR Timer0 and ADC registers
 #include "Registers.hpp"
 
 #include <Arduino.h>
+
+// ------------------------------ Description ------------------------------- //
+
+// This sketch drives a motorized fader using a PID controller. It follows a 
+// reference trajectory defined in `Reference.hpp`. The motor is disabled when
+// the user touches the knob of the fader.
+//
+// Everything is driven by Timer0, which runs (by default) at a rate of 
+// 31.250 kHz. This high rate is used to eliminate audible tones from the PWM
+// drive for the motor. 
+// Every 30 periods of Timer0 (960 µs), the analog input is sampled, and 
+// this causes the PID control loop to run in the main loop function.
+// Capacitive sensing is implemented by measuring the RC time on the touch pin
+// in the Timer0 interrupt handler. The “touched” status is sticky for >20 ms
+// to prevent interference from the 50 Hz mains.
 
 // -------------------------------- Hardware -------------------------------- //
 
@@ -21,31 +36,31 @@
 //
 // Connect the outer connections of the potentiometer to ground and Vcc.
 // Connect the 1,2EN enable pin of the L293D to Vcc.
-// Connect a 500kΩ resistor between pin D2 and Vcc.
+// Connect a 500kΩ pull-up resistor between pin D2 and Vcc.
 
 // ----------------------------- Configuration ------------------------------ //
 
 // Print the control loop and interrupt frequencies to Serial at startup:
-#define PRINT_FREQUENCIES
+constexpr bool PRINT_FREQUENCIES = true;
 
 // Print the setpoint, actual position and control signal to Serial.
-// Note that this slows down the control loop significantly, it goes from 
+// Note that this slows down the control loop significantly, it goes from
 // 29% to >83% CPU usage.
-// #define PRINT_CONTROLLER_SIGNALS
+constexpr bool PRINT_CONTROLLER_SIGNALS = false;
 
 // Actually drive the motors:
-#define ENABLE_CONTROLLER
+constexpr bool ENABLE_CONTROLLER = true;
 
 // Analog channel (0-5 on Uno, 0-7 on Nano)
 constexpr uint8_t analog_input = 0;
 // Use phase-correct PWM (true) or fast PWM (false), this determines the timer
 // interrupt frequency, prefer phase-correct PWM with prescaler 1 on 16 MHz
 // boards, and fast PWM with prescaler 1 on 8 MHz boards, both result in a PWM
-// and interrupt frequency of 31.250 kHz:
+// and interrupt frequency of 31.250 kHz (fast PWM is twice as fast):
 constexpr bool phase_correct_pwm = true;
-// The fader position will be sampled once per `interrupt_counter ` timer
+// The fader position will be sampled once per `interrupt_counter` timer
 // interrupts, this determines the sampling frequency of the control loop:
-constexpr uint8_t interrupt_counter = (60 / (1 + phase_correct_pwm));
+constexpr uint8_t interrupt_counter = 60 / (1 + phase_correct_pwm);
 // The prescaler for the timer, affects PWM and control loop frequencies:
 constexpr unsigned prescaler_fac = 1;
 
@@ -61,22 +76,21 @@ constexpr float interrupt_freq =
 // ---------------------------------- Main ---------------------------------- //
 
 int main() {
-#if defined(PRINT_FREQUENCIES) || defined(PRINT_CONTROLLER_SIGNALS)
-    Serial.begin(2000000);
-#endif
+    if (PRINT_FREQUENCIES || PRINT_CONTROLLER_SIGNALS)
+        Serial.begin(2000000);
+
     setupMotorTimer(phase_correct_pwm, prescaler);
     setupADC(analog_input);
 
-#ifdef PRINT_FREQUENCIES
-    Serial.print(F("Interrupt frequency (Hz): "));
-    Serial.println(interrupt_freq);
-    Serial.print(F("Controller sampling time (µs): "));
-    Serial.println(Ts * 1e6);
-#endif
-#ifdef PRINT_CONTROLLER_SIGNALS
-    Serial.println(F("0\t0\t0\t0"));
-    Serial.println(F("0\t0\t0\t1024"));
-#endif
+    if (PRINT_FREQUENCIES) {
+        Serial.print(F("Interrupt frequency (Hz): "));
+        Serial.println(interrupt_freq);
+        Serial.print(F("Controller sampling time (µs): "));
+        Serial.println(Ts * 1e6);
+    }
+    if (PRINT_CONTROLLER_SIGNALS) {
+        Serial.println(F("0\t0\t0\t0\r\n0\t0\t0\t1024"));
+    }
 
     ATOMIC_BLOCK(ATOMIC_FORCEON) {
         sbi(DDRB, 5);       // pin 13 output
@@ -115,22 +129,22 @@ void updateController(int16_t adcval, bool touched) {
 
     int16_t control = controller.update(adcval);
 
-#ifdef ENABLE_CONTROLLER
-    if (touched) // Turn of motor if knob is touched
-        motorForward(0);
-    else if (control >= 0)
-        motorForward(activation(control));
-    else
-        motorBackward(activation(-control));
-#endif
+    if (ENABLE_CONTROLLER) {
+        if (touched) // Turn of motor if knob is touched
+            motorForward(0);
+        else if (control >= 0)
+            motorForward(activation(control));
+        else
+            motorBackward(activation(-control));
+    }
 
-#ifdef PRINT_CONTROLLER_SIGNALS
-    Serial.print(controller.getSetpoint());
-    Serial.print('\t');
-    Serial.print(adcval);
-    Serial.print('\t');
-    Serial.println((control + 256) * 2);
-#endif
+    if (PRINT_CONTROLLER_SIGNALS) {
+        Serial.print(controller.getSetpoint());
+        Serial.print('\t');
+        Serial.print(adcval);
+        Serial.print('\t');
+        Serial.println((control + 256) * 2);
+    }
 }
 
 // ------------------------------- Main Loop -------------------------------- //
