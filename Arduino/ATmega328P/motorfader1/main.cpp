@@ -96,8 +96,8 @@ int main() {
     Serial.print(F("Controller sampling time (µs): "));
     Serial.println(Ts * 1e6); 
     //*/
-    Serial.println(F("0\t0\t0"));
-    Serial.println(F("0\t0\t1024"));
+    Serial.println(F("0\t0\t0\t0"));
+    Serial.println(F("0\t0\t0\t1024"));
     sbi(DDRB, 5);       // pin 13 output
     sbi(DDRD, 2);       // pin 2 output
     sbi(TIMSK0, TOIE0); // Enable timer 0 overflow interrupt
@@ -130,9 +130,9 @@ void updateController(int16_t adcval) {
     static uint8_t counter = 0;
     static size_t index = 0;
     static PID pid = {
-        3,     // Kp
-        10,    // Ki
-        -3e-2, // Kd
+        5,     // Kp
+        20,    // Ki
+        -4e-2, // Kd
         Ts,    // Ts
     };
 
@@ -154,7 +154,9 @@ void updateController(int16_t adcval) {
     int16_t control = pid.update(position);
     Serial.print(pid.setpoint);
     Serial.print('\t');
-    Serial.println(position);
+    Serial.print(position);
+    Serial.print('\t');
+    Serial.println((control + 256) * 2);
 
 #if 1
     if (touched)
