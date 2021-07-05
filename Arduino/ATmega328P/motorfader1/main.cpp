@@ -4,6 +4,7 @@
 #include "Signal.h"
 #include "util/delay.h"
 #include <Arduino.h>
+#include <math.h>
 
 #ifndef ARDUINO
 #undef F_CPU
@@ -28,7 +29,7 @@ void setupADC() {
 
     // cbi(ADCSRA, ADEN);  // disable ADC
     // sbi(ADCSRA, ADATE); // auto trigger enable
-    sbi(ADCSRA, ADEN); // disable ADC
+    sbi(ADCSRA, ADEN); // enable ADC
 
     cbi(ADMUX, REFS1); // Vcc reference
     sbi(ADMUX, REFS0); // Vcc reference
@@ -109,12 +110,14 @@ volatile int16_t adcval = -1;
 volatile bool touched = false;
 volatile uint8_t touchval = 0xFF;
 
-const int16_t knee = 10;
+const int16_t knee = 0;
 
-uint8_t activation(int16_t val) {
+uint8_t activation(uint16_t val) {
     if (val == 0)
         return 0;
     else
+        // return map(logf(val * 256u + 1u), 0, logf(255u * 256u + 1u), knee, 255);
+        // return map(sqrtf(val * 255u), 0, 255, knee, 255);
         return map(val, 0, 255, knee, 255);
 }
 
