@@ -16,12 +16,11 @@ inline void setupADC(uint8_t analog_input) {
         sbi(ADCSRA, ADPS1);
         sbi(ADCSRA, ADPS0);
 
-        ADMUX &= 0xF0;
-        ADMUX |= analog_input; // Select the analog mux channel
+        ADMUX &= 0xF0; // Select the analog mux channel
+        ADMUX |= analog_input;
 
-        sbi(ADCSRB,
-            ADTS2); // Trigger source = Timer/Counter0 Overflow (Table 23-6)
-        cbi(ADCSRB, ADTS1);
+        sbi(ADCSRB, ADTS2); // Trigger source: Timer/Counter0 Overflow
+        cbi(ADCSRB, ADTS1); // (Table 23-6)
         cbi(ADCSRB, ADTS0);
 
         cbi(ADCSRA, ADATE); // Auto trigger disable
