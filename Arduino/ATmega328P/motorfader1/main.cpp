@@ -5,14 +5,23 @@
 #include "util/delay.h"
 #include <Arduino.h>
 
+#ifndef ARDUINO
+#undef F_CPU
+#define F_CPU 16000000UL
+#endif
+
 #define sbi(port, bit) (port) |= (1 << (bit))
 #define cbi(port, bit) (port) &= ~(1 << (bit))
 
-constexpr uint8_t interruptCounter = 5;
-constexpr unsigned prescaler_fac = 8;
+constexpr uint8_t interruptCounter = 60;
+constexpr unsigned prescaler_fac = 1;
 constexpr auto prescaler = factorToTimer0Prescaler(prescaler_fac);
 static_assert(prescaler != Timer0Prescaler::Invalid, "Invalid prescaler");
-constexpr float Ts = 1. * prescaler_fac * (interruptCounter + 1) * 256 / F_CPU;
+constexpr static bool phase_correct_pwm = true;
+constexpr float Ts = 1. * prescaler_fac * (interruptCounter + 1) * 256 *
+                     (1 + phase_correct_pwm) / F_CPU;
+constexpr float interrupt_freq =
+    1. * F_CPU / prescaler_fac / 256 / (1 + phase_correct_pwm);
 
 void setupADC() {
     cli();
@@ -44,7 +53,8 @@ void setupADC() {
 
 void setupPWM() {
     cli();
-    setTimer0WGMode(Timer0WGMode::FastPWM);
+    setTimer0WGMode(phase_correct_pwm ? Timer0WGMode::PWM
+                                      : Timer0WGMode::FastPWM);
     setTimer0Prescaler(prescaler);
 
     sbi(DDRD, 5); // Output
@@ -78,10 +88,16 @@ int main() {
     Serial.begin(115200);
     setupMotor();
     setupADC();
-    Serial.println(Ts * 1e6);
-    sbi(DDRB, 5); // pin 13 output
-    sbi(DDRD, 2); // pin 2 output
-    // sbi(ADCSRA, ADEN); // enable ADC
+    /*
+    Serial.print(F("Interrupt frequency (Hz): "));
+    Serial.println(interrupt_freq);
+    Serial.print(F("Controller sampling time (µs): "));
+    Serial.println(Ts * 1e6); 
+    //*/
+    Serial.println(F("0\t0\t0"));
+    Serial.println(F("0\t0\t1024"));
+    sbi(DDRB, 5);       // pin 13 output
+    sbi(DDRD, 2);       // pin 2 output
     sbi(TIMSK0, TOIE0); // Enable timer 0 overflow interrupt
     while (true) {
         loop();
@@ -92,7 +108,7 @@ volatile int16_t adcval = -1;
 volatile bool touched = false;
 volatile uint8_t touchval = 0xFF;
 
-const int16_t knee = 50;
+const int16_t knee = 10;
 
 uint8_t activation(int16_t val) {
     if (val == 0)
@@ -102,18 +118,21 @@ uint8_t activation(int16_t val) {
 }
 
 void updateController(int16_t adcval) {
-    static EMA_f ema = 0.85;
-    static Hysteresis<2> hyst;
+    static EMA_f ema = 0.5;
+    static EMA_f ema_sp = 0;
+    constexpr uint8_t ADCIncBits = 2;
+    constexpr uint8_t HystBits = 1;
+    static Hysteresis<HystBits, uint16_t, uint16_t> hyst;
     static uint8_t counter = 0;
     static size_t index = 0;
     static PID pid = {
-        3,  // Kp
-        3,  // Ki
-        -2.5e-2,  // Kd
-        Ts, // Ts
+        3,     // Kp
+        10,     // Ki
+        -3e-2, // Kd
+        Ts,    // Ts
     };
 
-    if (counter++ >= 8) {
+    if (counter++ >= 4) {
         counter = 0;
     }
     if (counter == 0) {
@@ -123,10 +142,11 @@ void updateController(int16_t adcval) {
         if (index == len)
             index = 0;
     }
+    pid.setpoint = ema_sp(pid.setpoint);
 
-    hyst.update(ema(adcval));
+    hyst.update(ema(adcval << ADCIncBits));
 
-    uint16_t position = hyst.getValue() << 2;
+    uint16_t position = (hyst.getValue() >> ADCIncBits) << HystBits;
     int16_t control = pid.update(position);
     Serial.print(pid.setpoint);
     Serial.print('\t');
@@ -148,12 +168,12 @@ void loop() {
     interrupts();
     if (adcval_ >= 0) {
         // Serial.println(adcval_);
-        // sbi(PINB, 5); // toggle pin 13
+        // sbi(PORTB, 5);
         updateController(adcval_);
         noInterrupts();
         adcval = -1;
         interrupts();
-        // sbi(PINB, 5); // toggle pin 13
+        // cbi(PORTB, 5);
     }
     // noInterrupts();
     // uint8_t touchval_ = touchval;
@@ -166,8 +186,10 @@ void loop() {
     // }
 }
 
-constexpr int16_t touch_thres = 10;
-constexpr uint8_t touch_stickiness = 255;
+constexpr float rc_time_untouched = 100e-6;
+constexpr int16_t touch_thres = interrupt_freq * rc_time_untouched * 2;
+constexpr float period_50Hz = 1. / 50; // ignore mains noise
+constexpr uint16_t touch_stickiness = interrupt_freq * period_50Hz * 1.2;
 
 [[nodiscard]] inline bool touch_pin_read() { return (PIND & (1 << 2)) != 0; }
 [[nodiscard]] inline bool touch_pin_is_input() {
@@ -177,15 +199,17 @@ inline void touch_pin_output() { sbi(DDRD, 2); }
 inline void touch_pin_input() { cbi(DDRD, 2); }
 
 ISR(TIMER0_OVF_vect) {
+    // sbi(PORTB, 5); // turn on pin 13
     static uint8_t counter = 0;
     counter++;
     if (counter > interruptCounter) {
         counter = 0;
         sbi(ADCSRA, ADEN); // enable ADC
+        sbi(PORTB, 5);
     }
 
     static int16_t touchcounter = 0;
-    static uint8_t stickytouched = 0;
+    static uint16_t stickytouched = 0;
     if (touch_pin_is_input()) { // pin 2 is input
         if (touch_pin_read()) { // pin 2 is high
             if (touchcounter > touch_thres) {
@@ -195,7 +219,7 @@ ISR(TIMER0_OVF_vect) {
             }
             touch_pin_output(); // output mode, start discharging
             touchval = touchcounter;
-            touchcounter = -5;
+            touchcounter = -10;
         }
     } else if (touchcounter == 0) {
         touch_pin_input(); // input mode, start charging
@@ -208,10 +232,12 @@ ISR(TIMER0_OVF_vect) {
             touched = false;
         }
     }
+    // cbi(PORTB, 5);
 }
 
 ISR(ADC_vect) {
     adcval = ADC;
     cbi(ADCSRA, ADEN); // disable ADC
-    sbi(PINB, 5);      // toggle pin 13
+    // sbi(PINB, 5);      // toggle pin 13
+    cbi(PORTB, 5);
 }
