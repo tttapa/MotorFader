@@ -1,6 +1,12 @@
 #pragma once
 
 #include <avr/io.h>
+#include <util/delay.h> // F_CPU
+
+#ifndef ARDUINO // Ensures that my IDE sees the correct frequency
+#undef F_CPU
+#define F_CPU 16000000UL
+#endif
 
 enum class Timer0Prescaler : uint8_t {
     None = 0b000,
