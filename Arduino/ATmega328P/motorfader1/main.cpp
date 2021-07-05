@@ -26,8 +26,9 @@ constexpr float interrupt_freq =
 void setupADC() {
     cli();
 
-    cbi(ADCSRA, ADEN);  // disable ADC
-    sbi(ADCSRA, ADATE); // auto trigger enable
+    // cbi(ADCSRA, ADEN);  // disable ADC
+    // sbi(ADCSRA, ADATE); // auto trigger enable
+    sbi(ADCSRA, ADEN);  // disable ADC
 
     cbi(ADMUX, REFS1); // Vcc reference
     sbi(ADMUX, REFS0); // Vcc reference
@@ -204,8 +205,9 @@ ISR(TIMER0_OVF_vect) {
     counter++;
     if (counter > interruptCounter) {
         counter = 0;
-        sbi(ADCSRA, ADEN); // enable ADC
-        sbi(PORTB, 5);
+        sbi(ADCSRA, ADATE); // auto trigger enable
+        // sbi(ADCSRA, ADEN); // enable ADC
+        // sbi(PORTB, 5);
     }
 
     static int16_t touchcounter = 0;
@@ -237,7 +239,8 @@ ISR(TIMER0_OVF_vect) {
 
 ISR(ADC_vect) {
     adcval = ADC;
-    cbi(ADCSRA, ADEN); // disable ADC
-    // sbi(PINB, 5);      // toggle pin 13
-    cbi(PORTB, 5);
+    // cbi(ADCSRA, ADEN); // disable ADC
+    cbi(ADCSRA, ADATE); // auto trigger disable
+    sbi(PINB, 5);      // toggle pin 13
+    // cbi(PORTB, 5);
 }
