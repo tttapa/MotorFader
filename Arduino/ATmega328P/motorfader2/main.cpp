@@ -20,7 +20,7 @@
 // D13: scope to monitor timing          (PB5)
 //
 // Connect the outer connections of the potentiometer to ground and Vcc.
-// Connect the 1,2EN enable pin of the L293D to ground.
+// Connect the 1,2EN enable pin of the L293D to Vcc.
 // Connect a 500kΩ resistor between pin D2 and Vcc.
 
 // ----------------------------- Configuration ------------------------------ //
