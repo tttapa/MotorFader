@@ -13,11 +13,11 @@
 #define sbi(port, bit) (port) |= (1 << (bit))
 #define cbi(port, bit) (port) &= ~(1 << (bit))
 
-constexpr uint8_t interruptCounter = 60;
+constexpr static bool phase_correct_pwm = true;
+constexpr uint8_t interruptCounter = (60 / (1 + phase_correct_pwm)) - 1;
 constexpr unsigned prescaler_fac = 1;
 constexpr auto prescaler = factorToTimer0Prescaler(prescaler_fac);
 static_assert(prescaler != Timer0Prescaler::Invalid, "Invalid prescaler");
-constexpr static bool phase_correct_pwm = true;
 constexpr float Ts = 1. * prescaler_fac * (interruptCounter + 1) * 256 *
                      (1 + phase_correct_pwm) / F_CPU;
 constexpr float interrupt_freq =
@@ -28,7 +28,7 @@ void setupADC() {
 
     // cbi(ADCSRA, ADEN);  // disable ADC
     // sbi(ADCSRA, ADATE); // auto trigger enable
-    sbi(ADCSRA, ADEN);  // disable ADC
+    sbi(ADCSRA, ADEN); // disable ADC
 
     cbi(ADMUX, REFS1); // Vcc reference
     sbi(ADMUX, REFS0); // Vcc reference
@@ -128,7 +128,7 @@ void updateController(int16_t adcval) {
     static size_t index = 0;
     static PID pid = {
         3,     // Kp
-        10,     // Ki
+        10,    // Ki
         -3e-2, // Kd
         Ts,    // Ts
     };
@@ -241,6 +241,6 @@ ISR(ADC_vect) {
     adcval = ADC;
     // cbi(ADCSRA, ADEN); // disable ADC
     cbi(ADCSRA, ADATE); // auto trigger disable
-    sbi(PINB, 5);      // toggle pin 13
+    // sbi(PINB, 5);       // toggle pin 13
     // cbi(PORTB, 5);
 }
