@@ -3,6 +3,9 @@
 #include <avr/interrupt.h>
 #include <util/atomic.h>
 
+/// Enable the ADC with Vcc reference, /128 prescaler, Timer0 OVF trigger source,
+/// auto trigger disabled, ADC interrupt enabled, and with the mux set to the 
+/// given channel (@p analog_input).
 inline void setupADC(uint8_t analog_input) {
     ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
         cbi(ADCSRA, ADEN); // Disable ADC
