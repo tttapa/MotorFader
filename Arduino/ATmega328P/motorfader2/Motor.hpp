@@ -3,17 +3,20 @@
 #include <avr/interrupt.h>
 #include <util/atomic.h>
 
+/// Configure Timer0 in either phase correct or fast PWM mode with the given
+/// prescaler, enable output compare B, and set pins PD4 and PD5 to output mode.
 inline void setupMotorTimer(bool phase_correct_pwm, Timer0Prescaler prescaler) {
     ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
         setTimer0WGMode(phase_correct_pwm ? Timer0WGMode::PWM
                                           : Timer0WGMode::FastPWM);
         setTimer0Prescaler(prescaler);
         sbi(TCCR0A, COM0B1); // Table 14-6, 14-7 Compare Output Mode
-        sbi(DDRB, 4);        // GPIO output mode
+        sbi(DDRD, 4);        // GPIO output mode
         sbi(DDRD, 5);
     }
 }
 
+/// Move the motor forward with the given duty cycle (speed).
 inline void motorForward(uint8_t speed) {
     // Fast PWM (Table 14-6):
     //   Clear OC0B on Compare Match, set OC0B at BOTTOM (non-inverting mode).
@@ -27,6 +30,7 @@ inline void motorForward(uint8_t speed) {
     }
 }
 
+/// Move the motor backward with the given duty cycle (speed).
 inline void motorBackward(uint8_t speed) {
     // Fast PWM (Table 14-6):
     //   Set OC0B on Compare Match, clear OC0B at BOTTOM (inverting mode).

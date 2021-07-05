@@ -65,7 +65,7 @@ void setupPWM() {
 
 void setupMotor() {
     setupPWM();
-    sbi(DDRB, 4);
+    sbi(DDRD, 4);
 }
 
 void motorBackward(uint8_t speed) {
