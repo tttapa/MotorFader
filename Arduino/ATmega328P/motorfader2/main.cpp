@@ -34,7 +34,7 @@
 // D5:  input 2A of L293D dual H-bridge  (OC0B)
 // D13: scope to monitor timing          (PB5)
 //
-// Connect the outer connections of the potentiometer to ground and Vcc, it's 
+// Connect the outer connections of the potentiometer to ground and Vcc, it's
 // recommended to add a 100 nF capacitor between the wiper and ground.
 // Connect the 1,2EN enable pin of the L293D to Vcc.
 // Connect a 500kΩ pull-up resistor between pin D2 and Vcc.
@@ -42,7 +42,7 @@
 // ----------------------------- Configuration ------------------------------ //
 
 // Print the control loop and interrupt frequencies to Serial at startup:
-constexpr bool PRINT_FREQUENCIES = true;
+constexpr bool PRINT_FREQUENCIES = false;
 
 // Print the setpoint, actual position and control signal to Serial.
 // Note that this slows down the control loop significantly, it goes from
@@ -76,8 +76,9 @@ constexpr float interrupt_freq =
 
 // ---------------------------------- Main ---------------------------------- //
 
+void setup();
 int main() {
-    if (PRINT_FREQUENCIES || PRINT_CONTROLLER_SIGNALS)
+    if (PRINT_FREQUENCIES || PRINT_CONTROLLER_SIGNALS || 1)
         Serial.begin(2000000);
 
     setupMotorTimer(phase_correct_pwm, prescaler);
@@ -92,7 +93,9 @@ int main() {
     if (PRINT_CONTROLLER_SIGNALS) {
         Serial.println(F("0\t0\t0\t0\r\n0\t0\t0\t1024"));
     }
+    Serial.print(F("0\t0\t0\t0\r\n"));
 
+    setup();
     ATOMIC_BLOCK(ATOMIC_FORCEON) {
         sbi(DDRB, 5);       // pin 13 output
         cbi(PORTD, 2);      // pin 2 low
@@ -150,18 +153,36 @@ void updateController(int16_t adcval, bool touched) {
 
 // ------------------------------- Main Loop -------------------------------- //
 
-volatile int16_t adcval = -1;  // Latest ADC reading (updated in ADC ISR)
-volatile bool touched = false; // Knob touch status (updated in Timer0 ISR)
+constexpr uint8_t N_adc = 2;
+volatile int16_t adcval[N_adc]; // Latest ADC reading (updated in ADC ISR)
+volatile bool touched = false;  // Knob touch status (updated in Timer0 ISR)
+
+void setup() {
+    for (uint8_t i = 0; i < N_adc; ++i)
+        adcval[i] = -1;
+}
 
 void loop() {
     int16_t adcval;
-    ATOMIC_BLOCK(ATOMIC_FORCEON) { adcval = ::adcval; }
+#if 0 
+    ATOMIC_BLOCK(ATOMIC_FORCEON) { adcval = ::adcval[0]; }
     bool touched = ::touched;
     if (adcval >= 0) {
-        ATOMIC_BLOCK(ATOMIC_FORCEON) { ::adcval = -1; }
+        ATOMIC_BLOCK(ATOMIC_FORCEON) { ::adcval[0] = -1; }
         updateController(adcval, touched);
-        cbi(PORTB, 5);
+        // cbi(PORTB, 5);
     }
+#else
+    for (uint8_t i = 0; i < N_adc; ++i) {
+        ATOMIC_BLOCK(ATOMIC_FORCEON) { adcval = ::adcval[i]; }
+        if (adcval >= 0) {
+            ATOMIC_BLOCK(ATOMIC_FORCEON) { ::adcval[i] = -1; }
+            for (uint8_t n = 0; n < i; ++n)
+                Serial.print("-\t");
+            Serial.println(adcval);
+        }
+    }
+#endif
 }
 
 // ---------------------------- Capacitive Touch ---------------------------- //
@@ -205,14 +226,32 @@ void touchSample() {
 
 // ---------------------------------- ADC ----------------------------------- //
 
+volatile uint8_t adc_mux_idx = 0;
+volatile uint8_t adc_switch_channel = 0;
+
 // Enable the ADC trigger every `interrupt_counter` calls.
 void ADCSample() {
     static uint8_t counter = 0;
     counter++;
     if (counter >= interrupt_counter) {
         counter = 0;
+        adc_mux_idx = 0;
+        adc_switch_channel = 0;
+        ADMUX &= 0xF0;
         sbi(PORTB, 5);
-        sbi(ADCSRA, ADATE); // auto trigger enable
+        sbi(ADCSRA, ADATE); // Auto trigger enable
+    } else if (adc_switch_channel == 2) {
+        adc_switch_channel = 1;
+    } else if (adc_switch_channel == 1) {
+        adc_switch_channel = 0;
+        ++adc_mux_idx;
+        if (adc_mux_idx < N_adc) {
+            sbi(PORTB, 5);
+            ADMUX &= 0xF0;
+            ADMUX |= adc_mux_idx;
+        } else {
+            cbi(ADCSRA, ADATE); // Auto trigger disable
+        }
     }
 }
 
@@ -224,6 +263,7 @@ ISR(TIMER0_OVF_vect) {
 }
 
 ISR(ADC_vect) {
-    adcval = ADC;       // Store ADC reading
-    cbi(ADCSRA, ADATE); // Auto trigger disable
+    adcval[adc_mux_idx] = ADC; // Store ADC reading
+    adc_switch_channel = 2;
+    cbi(PORTB, 5);
 }
