@@ -36,23 +36,23 @@ struct Motor {
 
 template <>
 inline void Motor<0>::begin() {
-    sbi(DDRD, 4);
-    sbi(DDRD, 5);
-}
-template <>
-inline void Motor<1>::begin() {
-    sbi(DDRD, 7);
-    sbi(DDRD, 6);
-}
-template <>
-inline void Motor<2>::begin() {
     sbi(DDRD, 2);
     sbi(DDRD, 3);
 }
 template <>
-inline void Motor<3>::begin() {
+inline void Motor<1>::begin() {
     sbi(DDRB, 5);
     sbi(DDRB, 3);
+}
+template <>
+inline void Motor<2>::begin() {
+    sbi(DDRD, 4);
+    sbi(DDRD, 5);
+}
+template <>
+inline void Motor<3>::begin() {
+    sbi(DDRD, 7);
+    sbi(DDRD, 6);
 }
 
 // Fast PWM (Table 14-6):
@@ -63,33 +63,33 @@ inline void Motor<3>::begin() {
 template <>
 inline void Motor<0>::forward(uint8_t speed) {
     ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-        cbi(TCCR0A, COM0B0);
-        cbi(PORTD, 4);
-        OCR0B = speed;
-    }
-}
-template <>
-inline void Motor<1>::forward(uint8_t speed) {
-    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-        cbi(TCCR0A, COM0A0);
-        cbi(PORTD, 7);
-        OCR0A = speed;
-    }
-}
-template <>
-inline void Motor<2>::forward(uint8_t speed) {
-    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
         cbi(TCCR2A, COM2B0);
         cbi(PORTD, 2);
         OCR2B = speed;
     }
 }
 template <>
-inline void Motor<3>::forward(uint8_t speed) {
+inline void Motor<1>::forward(uint8_t speed) {
     ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
         cbi(TCCR2A, COM2A0);
         cbi(PORTB, 5);
         OCR2A = speed;
+    }
+}
+template <>
+inline void Motor<2>::forward(uint8_t speed) {
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+        cbi(TCCR0A, COM0B0);
+        cbi(PORTD, 4);
+        OCR0B = speed;
+    }
+}
+template <>
+inline void Motor<3>::forward(uint8_t speed) {
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+        cbi(TCCR0A, COM0A0);
+        cbi(PORTD, 7);
+        OCR0A = speed;
     }
 }
 
@@ -101,32 +101,32 @@ inline void Motor<3>::forward(uint8_t speed) {
 template <>
 inline void Motor<0>::backward(uint8_t speed) {
     ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-        sbi(TCCR0A, COM0B0);
-        sbi(PORTD, 4);
-        OCR0B = speed;
-    }
-}
-template <>
-inline void Motor<1>::backward(uint8_t speed) {
-    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-        sbi(TCCR0A, COM0A0);
-        sbi(PORTD, 7);
-        OCR0A = speed;
-    }
-}
-template <>
-inline void Motor<2>::backward(uint8_t speed) {
-    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
         sbi(TCCR2A, COM2B0);
         sbi(PORTD, 2);
         OCR2B = speed;
     }
 }
 template <>
-inline void Motor<3>::backward(uint8_t speed) {
+inline void Motor<1>::backward(uint8_t speed) {
     ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
         sbi(TCCR2A, COM2A0);
         sbi(PORTB, 5);
         OCR2A = speed;
+    }
+}
+template <>
+inline void Motor<2>::backward(uint8_t speed) {
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+        sbi(TCCR0A, COM0B0);
+        sbi(PORTD, 4);
+        OCR0B = speed;
+    }
+}
+template <>
+inline void Motor<3>::backward(uint8_t speed) {
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+        sbi(TCCR0A, COM0A0);
+        sbi(PORTD, 7);
+        OCR0A = speed;
     }
 }

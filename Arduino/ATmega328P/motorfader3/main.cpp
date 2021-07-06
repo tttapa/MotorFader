@@ -2,11 +2,11 @@
 #include "ADC.hpp"
 // PID controller:
 #include "Controller.hpp"
-// Configuration of PWM and Timer0 for driving the motor:
+// Configuration of PWM and Timer2/0 for driving the motor:
 #include "Motor.hpp"
 // Reference signal for testing the performance of the controller:
 #include "Reference.hpp"
-// Helpers for low-level AVR Timer0 and ADC registers
+// Helpers for low-level AVR Timer2/0 and ADC registers
 #include "Registers.hpp"
 // Capacitive touch sensing
 #include "Touch.hpp"
@@ -19,10 +19,10 @@
 // follows a reference trajectory defined in `Reference.hpp`. The motor is
 // disabled when the user touches the knob of the fader.
 //
-// Everything is driven by Timer0, which runs (by default) at a rate of
+// Everything is driven by Timer2, which runs (by default) at a rate of
 // 31.250 kHz. This high rate is used to eliminate audible tones from the PWM
-// drive for the motor. Timer2 is used for the PWM outputs of faders 3 and 4.
-// Every 24 periods of Timer0 (768 µs), each analog input is sampled, and
+// drive for the motor. Timer0 is used for the PWM outputs of faders 3 and 4.
+// Every 24 periods of Timer2 (768 µs), each analog input is sampled, and
 // this causes the PID control loop to run in the main loop function.
 // Capacitive sensing is implemented by measuring the RC time on the touch pin
 // in the Timer0 interrupt handler. The “touched” status is sticky for >20 ms
@@ -33,28 +33,28 @@
 // Fader 0:
 // - A0:  wiper of the potentiometer          (ADMUX0)
 // - D8:  touch pin of the knob               (PB0)
-// - D4:  input 1A of L293D dual H-bridge 1   (PD4)
-// - D5:  input 2A of L293D dual H-bridge 1   (OC0B)
+// - D2:  input 1A of L293D dual H-bridge 1   (PD2)
+// - D3:  input 2A of L293D dual H-bridge 1   (OC2B)
 //
 // Fader 1:
 // - A1:  wiper of the potentiometer          (ADMUX1)
 // - D9:  touch pin of the knob               (PB1)
-// - D7:  input 3A of L293D dual H-bridge 1   (PD7)
-// - D6:  input 4A of L293D dual H-bridge 1   (OC0A)
+// - D13: input 3A of L293D dual H-bridge 1   (PB5)
+// - D11: input 4A of L293D dual H-bridge 1   (OC2A)
 //
 // Fader 2:
 // - A2:  wiper of the potentiometer          (ADMUX2)
 // - D10: touch pin of the knob               (PB2)
-// - D2:  input 1A of L293D dual H-bridge 2   (PD2)
-// - D3:  input 2A of L293D dual H-bridge 2   (OC2B)
+// - D4:  input 1A of L293D dual H-bridge 2   (PD4)
+// - D5:  input 2A of L293D dual H-bridge 2   (OC0B)
 //
 // Fader 3:
 // - A3:  wiper of the potentiometer          (ADMUX3)
 // - D12: touch pin of the knob               (PB4)
-// - D13: input 3A of L293D dual H-bridge 2   (PB5)
-// - D11: input 4A of L293D dual H-bridge 2   (OC2A)
+// - D7:  input 3A of L293D dual H-bridge 2   (PD7)
+// - D6:  input 4A of L293D dual H-bridge 2   (OC0A)
 //
-// If fader 3 is unused:
+// If fader 1 is unused:
 // - D13: sLED or scope as overrun indicator  (PB5)
 //
 // Connect the outer connections of the potentiometers to ground and Vcc, it's
@@ -225,7 +225,7 @@ void readAndUpdateController() {
         // Write -1 so the controller doesn't run again until the next value is
         // available:
         ATOMIC_BLOCK(ATOMIC_FORCEON) { ::adcval[Idx] = -1; }
-        if (num_faders < 4) cbi(PORTB, 5); // Clear overrun indicator
+        if (num_faders < 2) cbi(PORTB, 5); // Clear overrun indicator
     }
 }
 
@@ -238,8 +238,8 @@ void setup() {
     if (print_frequencies || print_controller_signals) Serial.begin(1000000);
 
     setupADC(adc_prescaler);
-    if (num_faders > 0) setupMotorTimer0(phase_correct_pwm, prescaler0);
-    if (num_faders > 2) setupMotorTimer2(phase_correct_pwm, prescaler2);
+    if (num_faders > 0) setupMotorTimer2(phase_correct_pwm, prescaler2);
+    if (num_faders > 2) setupMotorTimer0(phase_correct_pwm, prescaler0);
 
     if (num_faders > 0) Controller<0>::controller.setActivityTimeout(timeout);
     if (num_faders > 1) Controller<1>::controller.setActivityTimeout(timeout);
@@ -247,7 +247,7 @@ void setup() {
     if (num_faders > 3) Controller<3>::controller.setActivityTimeout(timeout);
 
     ATOMIC_BLOCK(ATOMIC_FORCEON) {
-        if (num_faders < 4) sbi(DDRB, 5); // Pin 13 output (overrun indicator)
+        if (num_faders < 2) sbi(DDRB, 5); // Pin 13 output (overrun indicator)
 
         if (num_faders > 0) Motor<0>::begin();
         if (num_faders > 1) Motor<1>::begin();
@@ -270,7 +270,7 @@ void setup() {
         Serial.println(F("0\t0\t0\t0\r\n0\t0\t0\t1024"));
     }
 
-    sbi(TIMSK0, TOIE0); // Enable timer 0 overflow interrupt
+    sbi(TIMSK2, TOIE2); // Enable Timer2 overflow interrupt
 }
 
 void loop() {
@@ -350,13 +350,13 @@ void ADCSample() {
 
 // ------------------------------- Interrupts ------------------------------- //
 
-ISR(TIMER0_OVF_vect) {
+ISR(TIMER2_OVF_vect) {
     ADCSample();
     touchSample();
 }
 
 ISR(ADC_vect) {
-    if (num_faders < 4 && adcval[adc_mux_idx] >= 0)
+    if (num_faders < 2 && adcval[adc_mux_idx] >= 0)
         sbi(PORTB, 5);         // Set overrun indicator
     adcval[adc_mux_idx] = ADC; // Store ADC reading
 }
