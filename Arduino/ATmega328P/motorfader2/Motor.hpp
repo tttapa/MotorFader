@@ -11,6 +11,7 @@ inline void setupMotorTimer0(bool phase_correct, Timer0Prescaler prescaler) {
                                       : Timer0WGMode::FastPWM);
         setTimer0Prescaler(prescaler);
         sbi(TCCR0A, COM0B1); // Table 14-6, 14-7 Compare Output Mode
+        sbi(TCCR0A, COM0A1); // Table 14-6, 14-7 Compare Output Mode
     }
 }
 
@@ -22,6 +23,7 @@ inline void setupMotorTimer2(bool phase_correct, Timer2Prescaler prescaler) {
                                       : Timer2WGMode::FastPWM);
         setTimer2Prescaler(prescaler);
         sbi(TCCR2A, COM2B1); // Table 14-6, 14-7 Compare Output Mode
+        sbi(TCCR2A, COM2A1); // Table 14-6, 14-7 Compare Output Mode
     }
 }
 
@@ -85,7 +87,7 @@ inline void Motor<2>::forward(uint8_t speed) {
 template <>
 inline void Motor<3>::forward(uint8_t speed) {
     ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-        cbi(TCCR2A, COM2B0);
+        cbi(TCCR2A, COM2A0);
         // cbi(PORTB, 5);
         OCR2A = speed;
     }
@@ -123,7 +125,7 @@ inline void Motor<2>::backward(uint8_t speed) {
 template <>
 inline void Motor<3>::backward(uint8_t speed) {
     ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-        sbi(TCCR2A, COM2B0);
+        sbi(TCCR2A, COM2A0);
         // sbi(PORTB, 5);
         OCR2A = speed;
     }

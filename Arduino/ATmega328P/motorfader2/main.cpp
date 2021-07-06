@@ -49,7 +49,7 @@ constexpr bool PRINT_FREQUENCIES = false;
 // Print the setpoint, actual position and control signal to Serial.
 // Note that this slows down the control loop significantly, it goes from
 // 29% to >83% CPU usage.
-constexpr bool PRINT_CONTROLLER_SIGNALS = true;
+constexpr bool PRINT_CONTROLLER_SIGNALS = false;
 constexpr uint8_t controller_to_print = 2;
 
 // Actually drive the motors:
@@ -64,7 +64,7 @@ constexpr size_t num_faders = 4;
 constexpr bool phase_correct_pwm = true;
 // The fader position will be sampled once per `interrupt_counter` timer
 // interrupts, this determines the sampling frequency of the control loop:
-constexpr uint8_t interrupt_counter = 60 / (1 + phase_correct_pwm);
+constexpr uint8_t interrupt_counter = 40 / (1 + phase_correct_pwm);
 // The prescaler for the timer, affects PWM and control loop frequencies:
 constexpr unsigned prescaler_fac = 1;
 
@@ -163,11 +163,12 @@ void updateController(int16_t adcval, bool touched) {
 
     // Print status
     if (PRINT_CONTROLLER_SIGNALS && Idx == controller_to_print) {
-        // Serial.print(controller.getSetpoint());
-        // Serial.print('\t');
-        // Serial.print(adcval);
-        // Serial.print('\t');
-        Serial.println((control + 256) * 2);
+        Serial.print(controller.getSetpoint());
+        Serial.print('\t');
+        Serial.print(adcval);
+        Serial.print('\t');
+        Serial.print((control + 256) * 2);
+        Serial.println();
     }
 }
 
@@ -177,12 +178,9 @@ void readAndUpdateController() {
     ATOMIC_BLOCK(ATOMIC_FORCEON) { adcval = ::adcval[Idx]; }
     bool touched = TouchSense<Idx>::touched;
     if (adcval >= 0) {
-        if (Idx == 0)
-            sbi(PORTB, 5);
-        ATOMIC_BLOCK(ATOMIC_FORCEON) { ::adcval[Idx] = -1; }
         updateController<Idx>(adcval, touched);
-        if (Idx == num_faders - 1)
-            cbi(PORTB, 5);
+        ATOMIC_BLOCK(ATOMIC_FORCEON) { ::adcval[Idx] = -1; }
+        cbi(PORTB, 5);
     }
 }
 
@@ -194,6 +192,12 @@ void setup() {
 
     if (PRINT_FREQUENCIES || PRINT_CONTROLLER_SIGNALS)
         Serial.begin(1000000);
+
+    setupADC();
+    if (num_faders > 0)
+        setupMotorTimer0(phase_correct_pwm, prescaler0);
+    if (num_faders > 2)
+        setupMotorTimer2(phase_correct_pwm, prescaler2);
 
     ATOMIC_BLOCK(ATOMIC_FORCEON) {
         sbi(DDRB, 5); // pin 13 output (for debugging the timing)
@@ -216,12 +220,6 @@ void setup() {
         if (num_faders > 3)
             TouchSense<3>::begin();
     }
-
-    setupADC();
-    if (num_faders > 0)
-        setupMotorTimer0(phase_correct_pwm, prescaler0);
-    if (num_faders > 2)
-        setupMotorTimer2(phase_correct_pwm, prescaler2);
 
     if (PRINT_FREQUENCIES) {
         Serial.print(F("Interrupt frequency (Hz): "));
@@ -285,26 +283,34 @@ void touchSample() {
 
 volatile uint8_t adc_mux_idx = num_faders;
 
-void ADCNextChannel() {
-    ++adc_mux_idx;
-    if (adc_mux_idx < num_faders) {
-        ADMUX &= 0xF0;
-        ADMUX |= adc_mux_idx;
-    }
+void ADCStartConversion(uint8_t channel) {
+    adc_mux_idx = channel;
+    ADMUX &= 0xF0;
+    ADMUX |= adc_mux_idx;
+    sbi(ADCSRA, ADSC); // Start conversion
 }
+
+constexpr uint8_t adc_start_count = interrupt_counter / num_faders;
+constexpr unsigned long adc_clock = 125000UL; // TODO: make option
+constexpr float adc_rate = interrupt_freq / adc_start_count;
+static_assert(adc_rate <= adc_clock / 14.f, "ADC too slow");
 
 // Enable the ADC trigger every `interrupt_counter` calls.
 void ADCSample() {
     static uint8_t counter = 0;
+
+    if (num_faders > 0 && counter == 0 * adc_start_count)
+        ADCStartConversion(0);
+    else if (num_faders > 1 && counter == 1 * adc_start_count)
+        ADCStartConversion(1);
+    else if (num_faders > 2 && counter == 2 * adc_start_count)
+        ADCStartConversion(2);
+    else if (num_faders > 3 && counter == 3 * adc_start_count)
+        ADCStartConversion(3);
+
     counter++;
-    if (counter >= interrupt_counter) {
+    if (counter >= interrupt_counter)
         counter = 0;
-        if (adc_mux_idx == num_faders) {
-            adc_mux_idx = 0;
-            ADMUX &= 0xF0;
-            sbi(ADCSRA, ADSC); // Start conversion
-        }
-    }
 }
 
 // ------------------------------- Interrupts ------------------------------- //
@@ -315,8 +321,7 @@ ISR(TIMER0_OVF_vect) {
 }
 
 ISR(ADC_vect) {
+    if (adcval[adc_mux_idx] >= 0)
+        sbi(PORTB, 5);         // overrun indicator
     adcval[adc_mux_idx] = ADC; // Store ADC reading
-    ADCNextChannel();
-    if (adc_mux_idx < num_faders)
-        sbi(ADCSRA, ADSC); // Start conversion
 }
