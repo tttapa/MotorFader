@@ -44,7 +44,7 @@
 // ----------------------------- Configuration ------------------------------ //
 
 // Print the control loop and interrupt frequencies to Serial at startup:
-constexpr bool PRINT_FREQUENCIES = false;
+constexpr bool PRINT_FREQUENCIES = true;
 
 // Print the setpoint, actual position and control signal to Serial.
 // Note that this slows down the control loop significantly, it goes from
@@ -67,6 +67,8 @@ constexpr bool phase_correct_pwm = true;
 constexpr uint8_t interrupt_counter = 40 / (1 + phase_correct_pwm);
 // The prescaler for the timer, affects PWM and control loop frequencies:
 constexpr unsigned prescaler_fac = 1;
+// The prescaler for the ADC, affects speed of analog readings:
+constexpr uint8_t adc_prescaler_fac = 64;
 
 // -------------------------- Computed Quantities --------------------------- //
 
@@ -78,6 +80,9 @@ constexpr float Ts = 1. * prescaler_fac * interrupt_counter * 256 *
                      (1 + phase_correct_pwm) / F_CPU;
 constexpr float interrupt_freq =
     1. * F_CPU / prescaler_fac / 256 / (1 + phase_correct_pwm);
+constexpr auto adc_prescaler = factorToADCPrescaler(adc_prescaler_fac);
+static_assert(adc_prescaler != ADCPrescaler::Invalid, "Invalid prescaler");
+constexpr float adc_freq = 1. * F_CPU / adc_prescaler_fac;
 
 // ---------------------------------- Main ---------------------------------- //
 
@@ -193,7 +198,7 @@ void setup() {
     if (PRINT_FREQUENCIES || PRINT_CONTROLLER_SIGNALS)
         Serial.begin(1000000);
 
-    setupADC();
+    setupADC(adc_prescaler);
     if (num_faders > 0)
         setupMotorTimer0(phase_correct_pwm, prescaler0);
     if (num_faders > 2)
@@ -291,9 +296,10 @@ void ADCStartConversion(uint8_t channel) {
 }
 
 constexpr uint8_t adc_start_count = interrupt_counter / num_faders;
-constexpr unsigned long adc_clock = 125000UL; // TODO: make option
 constexpr float adc_rate = interrupt_freq / adc_start_count;
-static_assert(adc_rate <= adc_clock / 14.f, "ADC too slow");
+// Check that this doesn't take more time than the 13 ADC clock cycles it takes
+// to actually do the conversion.
+static_assert(adc_rate <= adc_freq / 14, "ADC too slow");
 
 // Enable the ADC trigger every `interrupt_counter` calls.
 void ADCSample() {

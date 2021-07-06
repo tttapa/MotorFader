@@ -3,9 +3,9 @@
 #include <avr/interrupt.h>
 #include <util/atomic.h>
 
-/// Enable the ADC with Vcc reference, /128 prescaler, auto trigger disabled,
-/// ADC interrupt enabled.
-inline void setupADC() {
+/// Enable the ADC with Vcc reference, with the given prescaler, auto trigger 
+/// disabled, ADC interrupt enabled.
+inline void setupADC(ADCPrescaler prescaler) {
     ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
         cbi(ADCSRA, ADEN); // Disable ADC
 
@@ -14,9 +14,7 @@ inline void setupADC() {
 
         cbi(ADMUX, ADLAR); // 8 least significant bits in ADCL
 
-        sbi(ADCSRA, ADPS2); // Prescaler /128
-        sbi(ADCSRA, ADPS1);
-        sbi(ADCSRA, ADPS0);
+        setADCPrescaler(prescaler);
 
         cbi(ADCSRA, ADATE); // Auto trigger disable
         sbi(ADCSRA, ADIE);  // ADC Interrupt Enable

@@ -138,3 +138,40 @@ inline void setTimer2WGMode(Timer2WGMode mode) {
     wbi(TCCR2A, WGM21, static_cast<uint8_t>(mode) & (1u << 1));
     wbi(TCCR2A, WGM20, static_cast<uint8_t>(mode) & (1u << 0));
 }
+
+// ---------------------------------- ADC ----------------------------------- //
+
+/// ADC prescaler select (Table 23-5).
+enum class ADCPrescaler : uint8_t {
+    S2 = 0b000,
+    S2_2 = 0b001,
+    S4 = 0b010,
+    S8 = 0b011,
+    S16 = 0b100,
+    S32 = 0b101,
+    S64 = 0b110,
+    S128 = 0b111,
+    Invalid = 0xFF,
+};
+
+// Convert the prescaler factor to the correct bit pattern to write to the
+// ADCSRA register (Table 23-5).
+constexpr inline ADCPrescaler factorToADCPrescaler(uint8_t factor) {
+    return factor == 2     ? ADCPrescaler::S2_2
+           : factor == 4   ? ADCPrescaler::S4
+           : factor == 8   ? ADCPrescaler::S8
+           : factor == 16  ? ADCPrescaler::S16
+           : factor == 32  ? ADCPrescaler::S32
+           : factor == 64  ? ADCPrescaler::S64
+           : factor == 128 ? ADCPrescaler::S128
+                           : ADCPrescaler::Invalid;
+}
+
+/// Set the prescaler of the ADC (Table 23-5).
+inline void setADCPrescaler(ADCPrescaler ps) {
+    if (ps == ADCPrescaler::Invalid)
+        return;
+    wbi(ADCSRA, ADPS2, static_cast<uint8_t>(ps) & (1u << 2));
+    wbi(ADCSRA, ADPS1, static_cast<uint8_t>(ps) & (1u << 1));
+    wbi(ADCSRA, ADPS0, static_cast<uint8_t>(ps) & (1u << 0));
+}
