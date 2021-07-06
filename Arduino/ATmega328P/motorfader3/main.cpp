@@ -22,7 +22,7 @@
 // Everything is driven by Timer0, which runs (by default) at a rate of
 // 31.250 kHz. This high rate is used to eliminate audible tones from the PWM
 // drive for the motor. Timer2 is used for the PWM outputs of faders 3 and 4.
-// Every 21 periods of Timer0 (672 µs), each analog input is sampled, and
+// Every 24 periods of Timer0 (768 µs), each analog input is sampled, and
 // this causes the PID control loop to run in the main loop function.
 // Capacitive sensing is implemented by measuring the RC time on the touch pin
 // in the Timer0 interrupt handler. The “touched” status is sticky for >20 ms
@@ -93,7 +93,7 @@ constexpr size_t num_faders = 4;
 constexpr bool phase_correct_pwm = true;
 // The fader position will be sampled once per `interrupt_counter` timer
 // interrupts, this determines the sampling frequency of the control loop:
-constexpr uint8_t interrupt_counter = 42 / (1 + phase_correct_pwm);
+constexpr uint8_t interrupt_counter = 48 / (1 + phase_correct_pwm);
 // The prescaler for the timer, affects PWM and control loop frequencies:
 constexpr unsigned prescaler_fac = 1;
 // The prescaler for the ADC, affects speed of analog readings:
