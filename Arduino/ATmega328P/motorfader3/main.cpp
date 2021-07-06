@@ -12,6 +12,10 @@
 #include "Touch.hpp"
 
 #include <Arduino.h>
+#include <Arduino_Helpers.h>
+#include <Wire.h>
+
+#include <AH/Filters/EMA.hpp>
 
 // ------------------------------ Description ------------------------------- //
 
@@ -93,7 +97,7 @@ constexpr size_t num_faders = 4;
 constexpr bool phase_correct_pwm = true;
 // The fader position will be sampled once per `interrupt_counter` timer
 // interrupts, this determines the sampling frequency of the control loop:
-constexpr uint8_t interrupt_counter = 48 / (1 + phase_correct_pwm);
+constexpr uint8_t interrupt_counter = 72 / (1 + phase_correct_pwm);
 // The prescaler for the timer, affects PWM and control loop frequencies:
 constexpr unsigned prescaler_fac = 1;
 // The prescaler for the ADC, affects speed of analog readings:
@@ -101,6 +105,9 @@ constexpr uint8_t adc_prescaler_fac = 64;
 
 // Turn off the motor after this many seconds of inactivity:
 constexpr float timeout = 2;
+
+// EMA filter factor for fader position filters:
+constexpr uint8_t ema_K = 2;
 
 // -------------------------- Computed Quantities --------------------------- //
 
@@ -116,18 +123,12 @@ constexpr auto adc_prescaler = factorToADCPrescaler(adc_prescaler_fac);
 static_assert(adc_prescaler != ADCPrescaler::Invalid, "Invalid prescaler");
 constexpr float adc_freq = 1. * F_CPU / adc_prescaler_fac;
 
-// ---------------------------------- Main ---------------------------------- //
-
-void setup();
-void loop();
-int main() {
-    setup();
-    while (true) {
-        loop();
-    }
-}
+// ------------------------------- ADC State -------------------------------- //
 
 volatile int16_t adcval[num_faders]; // Latest ADC reading (updated in ADC ISR)
+EMA<ema_K, uint16_t> filters[num_faders]; // Filters for ADC readings
+uint16_t filtered_adcval[num_faders];     // Filtered ADC readings
+uint16_t ADCReadManual(uint8_t idx);
 
 // ------------------------------- Controller ------------------------------- //
 
@@ -169,24 +170,17 @@ PID Controller<3>::controller {
     40,     // fc: cutoff frequency of derivative filter (Hz), zero to disable
 };
 
-// Activation function converts controller output to a PWM duty cycle (0-255)
-const uint8_t knee = 0; // set to positive value to eliminate PWM dead-zone
-uint8_t activation(uint8_t val) {
-    return val == 0 ? 0 : map(val, 0, 255, knee, 255);
-}
+volatile int16_t setpoints[num_faders];
 
 template <uint8_t Idx>
-void updateController(int16_t adcval, bool touched) {
+void updateController(int16_t setpoint, int16_t adcval, bool touched) {
     auto &controller = Controller<Idx>::controller;
 
     // Prevent the motor from being turned off after begin touched
     if (touched) controller.resetActivityCounter();
 
-    // Get the next setpoint
-    static uint8_t counter = 0;
-    if (counter == 0) controller.setSetpoint(getNextSetpoint<Idx>());
-    ++counter;
-    if (counter == 8) counter = 0;
+    // Set the target position
+    controller.setSetpoint(setpoint);
 
     // Update the PID controller to get the control action
     int16_t control = controller.update(adcval);
@@ -196,9 +190,9 @@ void updateController(int16_t adcval, bool touched) {
         if (touched) // Turn off motor if knob is touched
             Motor<Idx>::forward(0);
         else if (control >= 0)
-            Motor<Idx>::forward(activation(control));
+            Motor<Idx>::forward(control);
         else
-            Motor<Idx>::backward(activation(-control));
+            Motor<Idx>::backward(-control);
     }
 
     // Print status
@@ -214,14 +208,16 @@ void updateController(int16_t adcval, bool touched) {
 
 template <uint8_t Idx>
 void readAndUpdateController() {
+    int16_t adcval, setpoint;
     // Read the ADC value for the given fader:
-    int16_t adcval;
     ATOMIC_BLOCK(ATOMIC_FORCEON) { adcval = ::adcval[Idx]; }
     // If the ADC value was updated by the ADC interrupt, run the control loop:
     if (adcval >= 0) {
         // Check if the fader knob is touched
         bool touched = TouchSense<Idx>::touched;
-        updateController<Idx>(adcval, touched);
+        // Read the target position
+        ATOMIC_BLOCK(ATOMIC_FORCEON) { setpoint = ::setpoints[Idx]; }
+        updateController<Idx>(setpoint, adcval, touched);
         // Write -1 so the controller doesn't run again until the next value is
         // available:
         ATOMIC_BLOCK(ATOMIC_FORCEON) { ::adcval[Idx] = -1; }
@@ -232,8 +228,11 @@ void readAndUpdateController() {
 // ------------------------------- Main Loop -------------------------------- //
 
 void setup() {
-    for (uint8_t i = 0; i < num_faders; ++i)
+    for (uint8_t i = 0; i < num_faders; ++i) {
         adcval[i] = -1;
+        filtered_adcval[i] = ADCReadManual(i);
+        filters[i].reset(filtered_adcval[i]);
+    }
 
     if (print_frequencies || print_controller_signals) Serial.begin(1000000);
 
@@ -269,6 +268,13 @@ void setup() {
     if (print_controller_signals) {
         Serial.println(F("0\t0\t0\t0\r\n0\t0\t0\t1024"));
     }
+
+    // Initalize I²C slave and attach callbacks
+    Wire.begin(8);
+    void onRequest();
+    void onReceive(int);
+    Wire.onRequest(onRequest);
+    Wire.onReceive(onReceive);
 
     sbi(TIMSK2, TOIE2); // Enable Timer2 overflow interrupt
 }
@@ -348,6 +354,10 @@ void ADCSample() {
     if (counter == interrupt_counter) counter = 0;
 }
 
+uint16_t ADCReadManual(uint8_t idx) {
+    return analogRead(adc_mux_idx_to_mux_address(idx));
+}
+
 // ------------------------------- Interrupts ------------------------------- //
 
 ISR(TIMER2_OVF_vect) {
@@ -357,6 +367,34 @@ ISR(TIMER2_OVF_vect) {
 
 ISR(ADC_vect) {
     if (num_faders < 2 && adcval[adc_mux_idx] >= 0)
-        sbi(PORTB, 5);         // Set overrun indicator
-    adcval[adc_mux_idx] = ADC; // Store ADC reading
+        sbi(PORTB, 5);     // Set overrun indicator
+    uint16_t result = ADC; // Store ADC reading
+    adcval[adc_mux_idx] = result;
+    filtered_adcval[adc_mux_idx] = filters[adc_mux_idx](result << (6 - ema_K));
+}
+
+// ---------------------------------- Wire ---------------------------------- //
+
+void onRequest() {
+    uint8_t touch = 0;
+    if (num_faders > 0) touch |= TouchSense<0>::touched << 0;
+    if (num_faders > 1) touch |= TouchSense<1>::touched << 1;
+    if (num_faders > 2) touch |= TouchSense<2>::touched << 2;
+    if (num_faders > 3) touch |= TouchSense<3>::touched << 3;
+    Wire.write(touch);
+    for (uint8_t i = 0; i < num_faders; ++i)
+        Wire.write(reinterpret_cast<const uint8_t *>(&filtered_adcval[i]), 2);
+}
+
+void onReceive(int count) {
+    if (count < 2) return;
+    if (Wire.available() < 2) return;
+    uint16_t data = Wire.read();
+    data |= uint16_t(Wire.read()) << 8;
+    uint8_t idx = data >> 12;
+    data &= 0x03FF;
+    if (num_faders > 0 && idx == 0) setpoints[0] = data;
+    if (num_faders > 1 && idx == 1) setpoints[1] = data;
+    if (num_faders > 2 && idx == 2) setpoints[2] = data;
+    if (num_faders > 3 && idx == 3) setpoints[3] = data;
 }
