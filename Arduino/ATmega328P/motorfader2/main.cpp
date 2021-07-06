@@ -62,6 +62,9 @@
 // Connect the 1,2EN and 3,4EN enable pins of the L293D chips to Vcc.
 // Connect a 500kΩ pull-up resistor between each touch pin and Vcc.
 // On an Arduino Nano, you can set an option to use pins A6/A7 instead of A2/A3.
+// Note that D13 is often pulsed by the bootloader, which might cause the fader
+// to move when resetting the Arduino. You can either disable this behavior in
+// the bootloader, or use a different pin.
 
 // ----------------------------- Configuration ------------------------------ //
 
@@ -172,12 +175,12 @@ uint8_t activation(uint8_t val) {
 template <uint8_t Idx>
 void updateController(int16_t adcval, bool touched) {
     auto &controller = Controller<Idx>::controller;
+
     // Get the next setpoint
     static uint8_t counter = 0;
-    if (counter == 0)
-        controller.setSetpoint(getNextSetpoint<Idx>());
-    if (counter++ >= 8)
-        counter = 0;
+    if (counter == 0) controller.setSetpoint(getNextSetpoint<Idx>());
+    ++counter;
+    if (counter == 8) counter = 0;
 
     // Update the PID controller to get the control action
     int16_t control = controller.update(adcval);
@@ -205,14 +208,18 @@ void updateController(int16_t adcval, bool touched) {
 
 template <uint8_t Idx>
 void readAndUpdateController() {
+    // Read the ADC value for the given fader:
     int16_t adcval;
     ATOMIC_BLOCK(ATOMIC_FORCEON) { adcval = ::adcval[Idx]; }
-    bool touched = TouchSense<Idx>::touched;
+    // If the ADC value was updated by the ADC interrupt, run the control loop:
     if (adcval >= 0) {
+        // Check if the fader knob is touched
+        bool touched = TouchSense<Idx>::touched;
         updateController<Idx>(adcval, touched);
+        // Write -1 so the controller doesn't run again until the next value is
+        // available:
         ATOMIC_BLOCK(ATOMIC_FORCEON) { ::adcval[Idx] = -1; }
-        if (num_faders < 4)
-            cbi(PORTB, 5); // Clear overrun indicator
+        if (num_faders < 4) cbi(PORTB, 5); // Clear overrun indicator
     }
 }
 
@@ -222,36 +229,24 @@ void setup() {
     for (uint8_t i = 0; i < num_faders; ++i)
         adcval[i] = -1;
 
-    if (print_frequencies || print_controller_signals)
-        Serial.begin(1000000);
+    if (print_frequencies || print_controller_signals) Serial.begin(1000000);
 
     setupADC(adc_prescaler);
-    if (num_faders > 0)
-        setupMotorTimer0(phase_correct_pwm, prescaler0);
-    if (num_faders > 2)
-        setupMotorTimer2(phase_correct_pwm, prescaler2);
+    if (num_faders > 0) setupMotorTimer0(phase_correct_pwm, prescaler0);
+    if (num_faders > 2) setupMotorTimer2(phase_correct_pwm, prescaler2);
 
     ATOMIC_BLOCK(ATOMIC_FORCEON) {
-        if (num_faders < 4)
-            sbi(DDRB, 5); // Pin 13 output (overrun indicator)
+        if (num_faders < 4) sbi(DDRB, 5); // Pin 13 output (overrun indicator)
 
-        if (num_faders > 0)
-            Motor<0>::begin();
-        if (num_faders > 1)
-            Motor<1>::begin();
-        if (num_faders > 2)
-            Motor<2>::begin();
-        if (num_faders > 3)
-            Motor<3>::begin();
+        if (num_faders > 0) Motor<0>::begin();
+        if (num_faders > 1) Motor<1>::begin();
+        if (num_faders > 2) Motor<2>::begin();
+        if (num_faders > 3) Motor<3>::begin();
 
-        if (num_faders > 0)
-            TouchSense<0>::begin();
-        if (num_faders > 1)
-            TouchSense<1>::begin();
-        if (num_faders > 2)
-            TouchSense<2>::begin();
-        if (num_faders > 3)
-            TouchSense<3>::begin();
+        if (num_faders > 0) TouchSense<0>::begin();
+        if (num_faders > 1) TouchSense<1>::begin();
+        if (num_faders > 2) TouchSense<2>::begin();
+        if (num_faders > 3) TouchSense<3>::begin();
     }
 
     if (print_frequencies) {
@@ -268,14 +263,10 @@ void setup() {
 }
 
 void loop() {
-    if (num_faders > 0)
-        readAndUpdateController<0>();
-    if (num_faders > 1)
-        readAndUpdateController<1>();
-    if (num_faders > 2)
-        readAndUpdateController<2>();
-    if (num_faders > 3)
-        readAndUpdateController<3>();
+    if (num_faders > 0) readAndUpdateController<0>();
+    if (num_faders > 1) readAndUpdateController<1>();
+    if (num_faders > 2) readAndUpdateController<2>();
+    if (num_faders > 3) readAndUpdateController<3>();
 }
 
 // ---------------------------- Capacitive Touch ---------------------------- //
@@ -298,18 +289,13 @@ extern const int16_t touch_sense_discharge = 10 / num_faders;
 void touchSample() {
     static uint8_t counter = 0;
 
-    if (num_faders > 0 && counter == 0)
-        TouchSense<0>::update();
-    if (num_faders > 1 && counter == 1)
-        TouchSense<1>::update();
-    if (num_faders > 2 && counter == 2)
-        TouchSense<2>::update();
-    if (num_faders > 3 && counter == 3)
-        TouchSense<3>::update();
+    if (num_faders > 0 && counter == 0) TouchSense<0>::update();
+    if (num_faders > 1 && counter == 1) TouchSense<1>::update();
+    if (num_faders > 2 && counter == 2) TouchSense<2>::update();
+    if (num_faders > 3 && counter == 3) TouchSense<3>::update();
 
-    counter++;
-    if (counter >= num_faders)
-        counter = 0;
+    ++counter;
+    if (counter == num_faders) counter = 0;
 }
 
 // ---------------------------------- ADC ----------------------------------- //
@@ -347,9 +333,8 @@ void ADCSample() {
     else if (num_faders > 3 && counter == 3 * adc_start_count)
         ADCStartConversion(3);
 
-    counter++;
-    if (counter >= interrupt_counter)
-        counter = 0;
+    ++counter;
+    if (counter == interrupt_counter) counter = 0;
 }
 
 // ------------------------------- Interrupts ------------------------------- //

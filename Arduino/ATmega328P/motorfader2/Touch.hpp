@@ -75,14 +75,14 @@ void TouchSense<Idx>::begin() {
 //    the knob: if touchcounter is higher than a threshold (i.e. if the
 //    capacitance is higher), this probably means the knob is touched
 // 5. set the pin mode to “output”, to start discharging the pin to 0V again
-// 6. after touch_sense_discharge ticks, the pin has discharged, so switch to 
+// 6. after touch_sense_discharge ticks, the pin has discharged, so switch to
 //    “input” mode and start charging again for the next RC-time measurement
 //
-// The “touched” status is sticky: it will remain set for at least 
+// The “touched” status is sticky: it will remain set for at least
 // touch_sense_stickiness ticks. If the RC-time no longer exceeded the threshold
 // during that period, the “touched” status is cleared.
 //
-// This could probably be optimized by combining the different touch sense 
+// This could probably be optimized by combining the different touch sense
 // channels, but this is simpler and works fine.
 template <uint8_t Idx>
 void TouchSense<Idx>::update() {
@@ -98,9 +98,9 @@ void TouchSense<Idx>::update() {
     } else if (touchcounter == 0) {
         touch_pin_input(); // input mode, start charging
     }
-    touchcounter++;
+    ++touchcounter;
     if (stickytouched > 0) {
-        stickytouched--;
+        --stickytouched;
         if (stickytouched == 0) {
             touched = false;
         }
