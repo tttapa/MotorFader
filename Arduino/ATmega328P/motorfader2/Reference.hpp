@@ -147,6 +147,7 @@ constexpr size_t len(const T (&)[N]) {
 }
 const size_t reference_len = len(reference_signal);
 
+template <uint8_t>
 inline uint16_t getNextSetpoint() {
     static size_t index = 0;
     uint16_t setpoint = pgm_read_byte(reference_signal + index) * 4;

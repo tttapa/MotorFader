@@ -10,7 +10,7 @@ constexpr inline float horner_impl(float xa, const float *p, size_t count,
                       : horner_impl(xa, p, count - 1, p[count] + xa * t);
 }
 
-/// Evaluate a polynomial using 
+/// Evaluate a polynomial using
 /// [Horner's method](https://en.wikipedia.org/wiki/Horner%27s_method).
 template <size_t N>
 constexpr inline float horner(float x, float a, const float (&p)[N]) {
@@ -21,6 +21,7 @@ constexpr inline float horner(float x, float a, const float (&p)[N]) {
 /// component is filtered using an exponential moving average filter.
 class PID {
   public:
+    PID() = default;
     /// @param  kp
     ///         Proportional gain
     /// @param  ki
@@ -109,11 +110,11 @@ class PID {
     float getMaxOutput() const { return maxOutput; }
 
   private:
-    float Ts;                ///< Sampling time (seconds)
-    float maxOutput;         ///< Maximum control output magnitude
-    float kp;                ///< Proportional gain
-    float ki_Ts;             ///< Integral gain times Ts
-    float kd_Ts;             ///< Derivative gain divided by Ts
+    float Ts = 1;            ///< Sampling time (seconds)
+    float maxOutput = 255;   ///< Maximum control output magnitude
+    float kp = 1;            ///< Proportional gain
+    float ki_Ts = 0;         ///< Integral gain times Ts
+    float kd_Ts = 0;         ///< Derivative gain divided by Ts
     float emaAlpha = 1;      ///< Weight factor of derivative EMA filter.
     float previousInput = 0; ///< (Filtered) previous input for derivative.
     int16_t integral = 0;    ///< Sum of previous errors for integral.

@@ -8,6 +8,8 @@
 #include "Reference.hpp"
 // Helpers for low-level AVR Timer0 and ADC registers
 #include "Registers.hpp"
+// Capacitive touch sensing
+#include "Touch.hpp"
 
 #include <Arduino.h>
 
@@ -47,13 +49,14 @@ constexpr bool PRINT_FREQUENCIES = false;
 // Print the setpoint, actual position and control signal to Serial.
 // Note that this slows down the control loop significantly, it goes from
 // 29% to >83% CPU usage.
-constexpr bool PRINT_CONTROLLER_SIGNALS = false;
+constexpr bool PRINT_CONTROLLER_SIGNALS = true;
+constexpr uint8_t controller_to_print = 2;
 
 // Actually drive the motors:
 constexpr bool ENABLE_CONTROLLER = true;
 
-// Analog channel (0-5 on Uno, 0-7 on Nano)
-constexpr uint8_t analog_input = 0;
+// Number of faders. Must be between 1 and 4.
+constexpr size_t num_faders = 4;
 // Use phase-correct PWM (true) or fast PWM (false), this determines the timer
 // interrupt frequency, prefer phase-correct PWM with prescaler 1 on 16 MHz
 // boards, and fast PWM with prescaler 1 on 8 MHz boards, both result in a PWM
@@ -67,8 +70,10 @@ constexpr unsigned prescaler_fac = 1;
 
 // -------------------------- Computed Quantities --------------------------- //
 
-constexpr auto prescaler = factorToTimer0Prescaler(prescaler_fac);
-static_assert(prescaler != Timer0Prescaler::Invalid, "Invalid prescaler");
+constexpr auto prescaler0 = factorToTimer0Prescaler(prescaler_fac);
+static_assert(prescaler0 != Timer0Prescaler::Invalid, "Invalid prescaler");
+constexpr auto prescaler2 = factorToTimer2Prescaler(prescaler_fac);
+static_assert(prescaler2 != Timer2Prescaler::Invalid, "Invalid prescaler");
 constexpr float Ts = 1. * prescaler_fac * interrupt_counter * 256 *
                      (1 + phase_correct_pwm) / F_CPU;
 constexpr float interrupt_freq =
@@ -77,40 +82,49 @@ constexpr float interrupt_freq =
 // ---------------------------------- Main ---------------------------------- //
 
 void setup();
+void loop();
 int main() {
-    if (PRINT_FREQUENCIES || PRINT_CONTROLLER_SIGNALS || 1)
-        Serial.begin(2000000);
-
-    setupMotorTimer(phase_correct_pwm, prescaler);
-    setupADC(analog_input);
-
-    if (PRINT_FREQUENCIES) {
-        Serial.print(F("Interrupt frequency (Hz): "));
-        Serial.println(interrupt_freq);
-        Serial.print(F("Controller sampling time (µs): "));
-        Serial.println(Ts * 1e6);
-    }
-    if (PRINT_CONTROLLER_SIGNALS) {
-        Serial.println(F("0\t0\t0\t0\r\n0\t0\t0\t1024"));
-    }
-    Serial.print(F("0\t0\t0\t0\r\n"));
-
     setup();
-    ATOMIC_BLOCK(ATOMIC_FORCEON) {
-        sbi(DDRB, 5);       // pin 13 output
-        cbi(PORTD, 2);      // pin 2 low
-        sbi(DDRD, 2);       // pin 2 output
-        sbi(TIMSK0, TOIE0); // Enable timer 0 overflow interrupt
-    }
     while (true) {
         loop();
     }
 }
 
+volatile int16_t adcval[num_faders]; // Latest ADC reading (updated in ADC ISR)
+
 // ------------------------------- Controller ------------------------------- //
 
-// The main PID controller. Needs tuning for your specific setup:
-PID controller = {
+// The main PID controllers. Need tuning for your specific setup:
+template <uint8_t Idx>
+struct Controller {
+    static PID controller;
+};
+template <>
+PID Controller<0>::controller {
+    4,      // Kp: proportional gain
+    11,     // Ki: integral gain
+    -0.028, // Kd: derivative gain
+    Ts,     // Ts: sampling time
+    40,     // fc: cutoff frequency of derivative filter (Hz), zero to disable
+};
+template <>
+PID Controller<1>::controller {
+    4,      // Kp: proportional gain
+    11,     // Ki: integral gain
+    -0.028, // Kd: derivative gain
+    Ts,     // Ts: sampling time
+    40,     // fc: cutoff frequency of derivative filter (Hz), zero to disable
+};
+template <>
+PID Controller<2>::controller {
+    4,      // Kp: proportional gain
+    11,     // Ki: integral gain
+    -0.028, // Kd: derivative gain
+    Ts,     // Ts: sampling time
+    40,     // fc: cutoff frequency of derivative filter (Hz), zero to disable
+};
+template <>
+PID Controller<3>::controller {
     4,      // Kp: proportional gain
     11,     // Ki: integral gain
     -0.028, // Kd: derivative gain
@@ -124,110 +138,160 @@ uint8_t activation(uint8_t val) {
     return val == 0 ? 0 : map(val, 0, 255, knee, 255);
 }
 
+template <uint8_t Idx>
 void updateController(int16_t adcval, bool touched) {
+    auto &controller = Controller<Idx>::controller;
+    // Get the next setpoint
     static uint8_t counter = 0;
     if (counter == 0)
-        controller.setSetpoint(getNextSetpoint());
+        controller.setSetpoint(getNextSetpoint<Idx>());
     if (counter++ >= 8)
         counter = 0;
 
+    // Update the PID controller to get the control action
     int16_t control = controller.update(adcval);
 
+    // Apply the control action to the motor
     if (ENABLE_CONTROLLER) {
-        if (touched) // Turn of motor if knob is touched
-            motorForward(0);
+        if (touched) // Turn off motor if knob is touched
+            Motor<Idx>::forward(0);
         else if (control >= 0)
-            motorForward(activation(control));
+            Motor<Idx>::forward(activation(control));
         else
-            motorBackward(activation(-control));
+            Motor<Idx>::backward(activation(-control));
     }
 
-    if (PRINT_CONTROLLER_SIGNALS) {
-        Serial.print(controller.getSetpoint());
-        Serial.print('\t');
-        Serial.print(adcval);
-        Serial.print('\t');
+    // Print status
+    if (PRINT_CONTROLLER_SIGNALS && Idx == controller_to_print) {
+        // Serial.print(controller.getSetpoint());
+        // Serial.print('\t');
+        // Serial.print(adcval);
+        // Serial.print('\t');
         Serial.println((control + 256) * 2);
+    }
+}
+
+template <uint8_t Idx>
+void readAndUpdateController() {
+    int16_t adcval;
+    ATOMIC_BLOCK(ATOMIC_FORCEON) { adcval = ::adcval[Idx]; }
+    bool touched = TouchSense<Idx>::touched;
+    if (adcval >= 0) {
+        if (Idx == 0)
+            sbi(PORTB, 5);
+        ATOMIC_BLOCK(ATOMIC_FORCEON) { ::adcval[Idx] = -1; }
+        updateController<Idx>(adcval, touched);
+        if (Idx == num_faders - 1)
+            cbi(PORTB, 5);
     }
 }
 
 // ------------------------------- Main Loop -------------------------------- //
 
-constexpr uint8_t N_adc = 2;
-volatile int16_t adcval[N_adc]; // Latest ADC reading (updated in ADC ISR)
-volatile bool touched = false;  // Knob touch status (updated in Timer0 ISR)
-
 void setup() {
-    for (uint8_t i = 0; i < N_adc; ++i)
+    for (uint8_t i = 0; i < num_faders; ++i)
         adcval[i] = -1;
+
+    if (PRINT_FREQUENCIES || PRINT_CONTROLLER_SIGNALS)
+        Serial.begin(1000000);
+
+    ATOMIC_BLOCK(ATOMIC_FORCEON) {
+        sbi(DDRB, 5); // pin 13 output (for debugging the timing)
+
+        if (num_faders > 0)
+            Motor<0>::begin();
+        if (num_faders > 1)
+            Motor<1>::begin();
+        if (num_faders > 2)
+            Motor<2>::begin();
+        if (num_faders > 3)
+            Motor<3>::begin();
+
+        if (num_faders > 0)
+            TouchSense<0>::begin();
+        if (num_faders > 1)
+            TouchSense<1>::begin();
+        if (num_faders > 2)
+            TouchSense<2>::begin();
+        if (num_faders > 3)
+            TouchSense<3>::begin();
+    }
+
+    setupADC();
+    if (num_faders > 0)
+        setupMotorTimer0(phase_correct_pwm, prescaler0);
+    if (num_faders > 2)
+        setupMotorTimer2(phase_correct_pwm, prescaler2);
+
+    if (PRINT_FREQUENCIES) {
+        Serial.print(F("Interrupt frequency (Hz): "));
+        Serial.println(interrupt_freq);
+        Serial.print(F("Controller sampling time (µs): "));
+        Serial.println(Ts * 1e6);
+    }
+    if (PRINT_CONTROLLER_SIGNALS) {
+        Serial.println(F("0\t0\t0\t0\r\n0\t0\t0\t1024"));
+    }
+
+    sbi(TIMSK0, TOIE0); // Enable timer 0 overflow interrupt
 }
 
 void loop() {
-    int16_t adcval;
-#if 0 
-    ATOMIC_BLOCK(ATOMIC_FORCEON) { adcval = ::adcval[0]; }
-    bool touched = ::touched;
-    if (adcval >= 0) {
-        ATOMIC_BLOCK(ATOMIC_FORCEON) { ::adcval[0] = -1; }
-        updateController(adcval, touched);
-        // cbi(PORTB, 5);
-    }
-#else
-    for (uint8_t i = 0; i < N_adc; ++i) {
-        ATOMIC_BLOCK(ATOMIC_FORCEON) { adcval = ::adcval[i]; }
-        if (adcval >= 0) {
-            ATOMIC_BLOCK(ATOMIC_FORCEON) { ::adcval[i] = -1; }
-            for (uint8_t n = 0; n < i; ++n)
-                Serial.print("-\t");
-            Serial.println(adcval);
-        }
-    }
-#endif
+    if (num_faders > 0)
+        readAndUpdateController<0>();
+    if (num_faders > 1)
+        readAndUpdateController<1>();
+    if (num_faders > 2)
+        readAndUpdateController<2>();
+    if (num_faders > 3)
+        readAndUpdateController<3>();
 }
 
 // ---------------------------- Capacitive Touch ---------------------------- //
 
 // Increase this time constant if the capacitive touch sense is too sensitive or
 // decrease it if it's not sensitive enough:
-constexpr float rc_time_untouched = 100e-6; // seconds
-constexpr int16_t touch_thres = interrupt_freq * rc_time_untouched * 1.2;
-constexpr float period_50Hz = 1. / 50; // ignore mains noise
-constexpr uint16_t touch_stickiness = interrupt_freq * period_50Hz * 1.2;
-constexpr int16_t touch_discharge = 10;
+constexpr float rc_time_untouched = 200e-6; // seconds
 
-[[nodiscard]] bool touch_pin_read() { return (PIND & (1 << 2)) != 0; }
-[[nodiscard]] bool touch_pin_is_input() { return (DDRD & (1 << 2)) == 0; }
-void touch_pin_output() { sbi(DDRD, 2); }
-void touch_pin_input() { cbi(DDRD, 2); }
+// Compute the actual threshold as a number of interrupts:
+extern const int16_t touch_sense_thres =
+    interrupt_freq * rc_time_untouched * 2 / num_faders;
+// Ignore mains noise by making the “touched” status stick for longer than the
+// mains period:
+constexpr float period_50Hz = 1. / 50;
+extern const uint16_t touch_sense_stickiness =
+    interrupt_freq * period_50Hz * 1.2 / num_faders;
+// How many interrupts to discharge the pin for:
+extern const int16_t touch_sense_discharge = 10 / num_faders;
 
 void touchSample() {
-    static int16_t touchcounter = 0;
-    static uint16_t stickytouched = 0;
-    if (touch_pin_is_input()) { // pin 2 is input
-        if (touch_pin_read()) { // pin 2 is high
-            if (touchcounter > touch_thres) {
-                touched = true;
-                stickytouched = touch_stickiness;
-            }
-            touch_pin_output(); // output mode, start discharging
-            touchcounter = -touch_discharge;
-        }
-    } else if (touchcounter == 0) {
-        touch_pin_input(); // input mode, start charging
-    }
-    touchcounter++;
-    if (stickytouched > 0) {
-        stickytouched--;
-        if (stickytouched == 0) {
-            touched = false;
-        }
-    }
+    static uint8_t counter = 0;
+
+    if (num_faders > 0 && counter == 0)
+        TouchSense<0>::update();
+    if (num_faders > 1 && counter == 1)
+        TouchSense<1>::update();
+    if (num_faders > 2 && counter == 2)
+        TouchSense<2>::update();
+    if (num_faders > 3 && counter == 3)
+        TouchSense<3>::update();
+
+    counter++;
+    if (counter >= num_faders)
+        counter = 0;
 }
 
 // ---------------------------------- ADC ----------------------------------- //
 
-volatile uint8_t adc_mux_idx = 0;
-volatile uint8_t adc_switch_channel = 0;
+volatile uint8_t adc_mux_idx = num_faders;
+
+void ADCNextChannel() {
+    ++adc_mux_idx;
+    if (adc_mux_idx < num_faders) {
+        ADMUX &= 0xF0;
+        ADMUX |= adc_mux_idx;
+    }
+}
 
 // Enable the ADC trigger every `interrupt_counter` calls.
 void ADCSample() {
@@ -235,22 +299,10 @@ void ADCSample() {
     counter++;
     if (counter >= interrupt_counter) {
         counter = 0;
-        adc_mux_idx = 0;
-        adc_switch_channel = 0;
-        ADMUX &= 0xF0;
-        sbi(PORTB, 5);
-        sbi(ADCSRA, ADATE); // Auto trigger enable
-    } else if (adc_switch_channel == 2) {
-        adc_switch_channel = 1;
-    } else if (adc_switch_channel == 1) {
-        adc_switch_channel = 0;
-        ++adc_mux_idx;
-        if (adc_mux_idx < N_adc) {
-            sbi(PORTB, 5);
+        if (adc_mux_idx == num_faders) {
+            adc_mux_idx = 0;
             ADMUX &= 0xF0;
-            ADMUX |= adc_mux_idx;
-        } else {
-            cbi(ADCSRA, ADATE); // Auto trigger disable
+            sbi(ADCSRA, ADSC); // Start conversion
         }
     }
 }
@@ -264,6 +316,7 @@ ISR(TIMER0_OVF_vect) {
 
 ISR(ADC_vect) {
     adcval[adc_mux_idx] = ADC; // Store ADC reading
-    adc_switch_channel = 2;
-    cbi(PORTB, 5);
+    ADCNextChannel();
+    if (adc_mux_idx < num_faders)
+        sbi(ADCSRA, ADSC); // Start conversion
 }
