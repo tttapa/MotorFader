@@ -15,14 +15,14 @@
 
 // ------------------------------ Description ------------------------------- //
 
-// This sketch drives a motorized fader using a PID controller. It follows a
-// reference trajectory defined in `Reference.hpp`. The motor is disabled when
-// the user touches the knob of the fader.
+// This sketch drives up to four motorized fader using a PID controller. It
+// follows a reference trajectory defined in `Reference.hpp`. The motor is
+// disabled when the user touches the knob of the fader.
 //
 // Everything is driven by Timer0, which runs (by default) at a rate of
 // 31.250 kHz. This high rate is used to eliminate audible tones from the PWM
-// drive for the motor.
-// Every 30 periods of Timer0 (960 µs), the analog input is sampled, and
+// drive for the motor. Timer2 is used for the PWM outputs of faders 3 and 4.
+// Every 21 periods of Timer0 (672 µs), each analog input is sampled, and
 // this causes the PID control loop to run in the main loop function.
 // Capacitive sensing is implemented by measuring the RC time on the touch pin
 // in the Timer0 interrupt handler. The “touched” status is sticky for >20 ms
@@ -30,32 +30,58 @@
 
 // -------------------------------- Hardware -------------------------------- //
 
-// A0:  potentiometer of motorized fader (ADMUX0)
-// D2:  touch pin of motorized fader     (PD2)
-// D4:  input 1A of L293D dual H-bridge  (PD4)
-// D5:  input 2A of L293D dual H-bridge  (OC0B)
-// D13: scope to monitor timing          (PB5)
+// Fader 0:
+// - A0:  wiper of the potentiometer          (ADMUX0)
+// - D8:  touch pin of the knob               (PB0)
+// - D4:  input 1A of L293D dual H-bridge 1   (PD4)
+// - D5:  input 2A of L293D dual H-bridge 1   (OC0B)
 //
-// Connect the outer connections of the potentiometer to ground and Vcc, it's
-// recommended to add a 100 nF capacitor between the wiper and ground.
-// Connect the 1,2EN enable pin of the L293D to Vcc.
-// Connect a 500kΩ pull-up resistor between pin D2 and Vcc.
+// Fader 1:
+// - A1:  wiper of the potentiometer          (ADMUX1)
+// - D9:  touch pin of the knob               (PB1)
+// - D7:  input 3A of L293D dual H-bridge 1   (PD7)
+// - D6:  input 4A of L293D dual H-bridge 1   (OC0A)
+//
+// Fader 2:
+// - A2:  wiper of the potentiometer          (ADMUX2)
+// - D10: touch pin of the knob               (PB2)
+// - D2:  input 1A of L293D dual H-bridge 2   (PD2)
+// - D3:  input 2A of L293D dual H-bridge 2   (OC2B)
+//
+// Fader 3:
+// - A3:  wiper of the potentiometer          (ADMUX3)
+// - D12: touch pin of the knob               (PB4)
+// - D13: input 3A of L293D dual H-bridge 2   (PB5)
+// - D11: input 4A of L293D dual H-bridge 2   (OC2A)
+//
+// If fader 3 is unused:
+// - D13: sLED or scope as overrun indicator  (PB5)
+//
+// Connect the outer connections of the potentiometers to ground and Vcc, it's
+// recommended to add a 100 nF capacitor between each wiper and ground.
+// Connect the 1,2EN and 3,4EN enable pins of the L293D chips to Vcc.
+// Connect a 500kΩ pull-up resistor between each touch pin and Vcc.
+// On an Arduino Nano, you can set an option to use pins A6/A7 instead of A2/A3.
 
 // ----------------------------- Configuration ------------------------------ //
 
 // Print the control loop and interrupt frequencies to Serial at startup:
-constexpr bool PRINT_FREQUENCIES = true;
+constexpr bool print_frequencies = true;
 
 // Print the setpoint, actual position and control signal to Serial.
 // Note that this slows down the control loop significantly, it goes from
 // 29% to >83% CPU usage.
-constexpr bool PRINT_CONTROLLER_SIGNALS = false;
+constexpr bool print_controller_signals = false;
 constexpr uint8_t controller_to_print = 2;
 
 // Actually drive the motors:
-constexpr bool ENABLE_CONTROLLER = true;
+constexpr bool enable_controller = true;
 
-// Number of faders. Must be between 1 and 4.
+// Use analog pins (A0, A1, A6, A7) instead of (A0, A1, A2, A3), useful for
+// saving digital pins on an Arduino Nano:
+constexpr bool use_A6_A7 = false;
+
+// Number of faders, must be between 1 and 4:
 constexpr size_t num_faders = 4;
 // Use phase-correct PWM (true) or fast PWM (false), this determines the timer
 // interrupt frequency, prefer phase-correct PWM with prescaler 1 on 16 MHz
@@ -64,7 +90,7 @@ constexpr size_t num_faders = 4;
 constexpr bool phase_correct_pwm = true;
 // The fader position will be sampled once per `interrupt_counter` timer
 // interrupts, this determines the sampling frequency of the control loop:
-constexpr uint8_t interrupt_counter = 40 / (1 + phase_correct_pwm);
+constexpr uint8_t interrupt_counter = 42 / (1 + phase_correct_pwm);
 // The prescaler for the timer, affects PWM and control loop frequencies:
 constexpr unsigned prescaler_fac = 1;
 // The prescaler for the ADC, affects speed of analog readings:
@@ -157,7 +183,7 @@ void updateController(int16_t adcval, bool touched) {
     int16_t control = controller.update(adcval);
 
     // Apply the control action to the motor
-    if (ENABLE_CONTROLLER) {
+    if (enable_controller) {
         if (touched) // Turn off motor if knob is touched
             Motor<Idx>::forward(0);
         else if (control >= 0)
@@ -167,7 +193,7 @@ void updateController(int16_t adcval, bool touched) {
     }
 
     // Print status
-    if (PRINT_CONTROLLER_SIGNALS && Idx == controller_to_print) {
+    if (print_controller_signals && Idx == controller_to_print) {
         Serial.print(controller.getSetpoint());
         Serial.print('\t');
         Serial.print(adcval);
@@ -185,7 +211,8 @@ void readAndUpdateController() {
     if (adcval >= 0) {
         updateController<Idx>(adcval, touched);
         ATOMIC_BLOCK(ATOMIC_FORCEON) { ::adcval[Idx] = -1; }
-        cbi(PORTB, 5);
+        if (num_faders < 4)
+            cbi(PORTB, 5); // Clear overrun indicator
     }
 }
 
@@ -195,7 +222,7 @@ void setup() {
     for (uint8_t i = 0; i < num_faders; ++i)
         adcval[i] = -1;
 
-    if (PRINT_FREQUENCIES || PRINT_CONTROLLER_SIGNALS)
+    if (print_frequencies || print_controller_signals)
         Serial.begin(1000000);
 
     setupADC(adc_prescaler);
@@ -205,7 +232,8 @@ void setup() {
         setupMotorTimer2(phase_correct_pwm, prescaler2);
 
     ATOMIC_BLOCK(ATOMIC_FORCEON) {
-        sbi(DDRB, 5); // pin 13 output (for debugging the timing)
+        if (num_faders < 4)
+            sbi(DDRB, 5); // Pin 13 output (overrun indicator)
 
         if (num_faders > 0)
             Motor<0>::begin();
@@ -226,13 +254,13 @@ void setup() {
             TouchSense<3>::begin();
     }
 
-    if (PRINT_FREQUENCIES) {
+    if (print_frequencies) {
         Serial.print(F("Interrupt frequency (Hz): "));
         Serial.println(interrupt_freq);
         Serial.print(F("Controller sampling time (µs): "));
         Serial.println(Ts * 1e6);
     }
-    if (PRINT_CONTROLLER_SIGNALS) {
+    if (print_controller_signals) {
         Serial.println(F("0\t0\t0\t0\r\n0\t0\t0\t1024"));
     }
 
@@ -288,10 +316,15 @@ void touchSample() {
 
 volatile uint8_t adc_mux_idx = num_faders;
 
+constexpr uint8_t adc_mux_idx_to_mux_address(uint8_t adc_mux_idx) {
+    return use_A6_A7 ? (adc_mux_idx < 2 ? adc_mux_idx : adc_mux_idx + 4)
+                     : adc_mux_idx;
+}
+
 void ADCStartConversion(uint8_t channel) {
     adc_mux_idx = channel;
     ADMUX &= 0xF0;
-    ADMUX |= adc_mux_idx;
+    ADMUX |= adc_mux_idx_to_mux_address(channel);
     sbi(ADCSRA, ADSC); // Start conversion
 }
 
@@ -327,7 +360,7 @@ ISR(TIMER0_OVF_vect) {
 }
 
 ISR(ADC_vect) {
-    if (adcval[adc_mux_idx] >= 0)
-        sbi(PORTB, 5);         // overrun indicator
+    if (num_faders < 4 && adcval[adc_mux_idx] >= 0)
+        sbi(PORTB, 5);         // Set overrun indicator
     adcval[adc_mux_idx] = ADC; // Store ADC reading
 }

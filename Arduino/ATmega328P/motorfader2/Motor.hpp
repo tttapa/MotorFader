@@ -51,7 +51,7 @@ inline void Motor<2>::begin() {
 }
 template <>
 inline void Motor<3>::begin() {
-    // sbi(DDRB, 5);
+    sbi(DDRB, 5);
     sbi(DDRB, 3);
 }
 
@@ -88,7 +88,7 @@ template <>
 inline void Motor<3>::forward(uint8_t speed) {
     ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
         cbi(TCCR2A, COM2A0);
-        // cbi(PORTB, 5);
+        cbi(PORTB, 5);
         OCR2A = speed;
     }
 }
@@ -126,7 +126,7 @@ template <>
 inline void Motor<3>::backward(uint8_t speed) {
     ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
         sbi(TCCR2A, COM2A0);
-        // sbi(PORTB, 5);
+        sbi(PORTB, 5);
         OCR2A = speed;
     }
 }
