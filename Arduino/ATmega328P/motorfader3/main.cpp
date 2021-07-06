@@ -99,6 +99,9 @@ constexpr unsigned prescaler_fac = 1;
 // The prescaler for the ADC, affects speed of analog readings:
 constexpr uint8_t adc_prescaler_fac = 64;
 
+// Turn off the motor after this many seconds of inactivity:
+constexpr float timeout = 2;
+
 // -------------------------- Computed Quantities --------------------------- //
 
 constexpr auto prescaler0 = factorToTimer0Prescaler(prescaler_fac);
@@ -176,6 +179,9 @@ template <uint8_t Idx>
 void updateController(int16_t adcval, bool touched) {
     auto &controller = Controller<Idx>::controller;
 
+    // Prevent the motor from being turned off after begin touched
+    if (touched) controller.resetActivityCounter();
+
     // Get the next setpoint
     static uint8_t counter = 0;
     if (counter == 0) controller.setSetpoint(getNextSetpoint<Idx>());
@@ -234,6 +240,11 @@ void setup() {
     setupADC(adc_prescaler);
     if (num_faders > 0) setupMotorTimer0(phase_correct_pwm, prescaler0);
     if (num_faders > 2) setupMotorTimer2(phase_correct_pwm, prescaler2);
+
+    if (num_faders > 0) Controller<0>::controller.setActivityTimeout(timeout);
+    if (num_faders > 1) Controller<1>::controller.setActivityTimeout(timeout);
+    if (num_faders > 2) Controller<2>::controller.setActivityTimeout(timeout);
+    if (num_faders > 3) Controller<3>::controller.setActivityTimeout(timeout);
 
     ATOMIC_BLOCK(ATOMIC_FORCEON) {
         if (num_faders < 4) sbi(DDRB, 5); // Pin 13 output (overrun indicator)
