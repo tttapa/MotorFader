@@ -9,11 +9,11 @@
 // Helpers for low-level AVR Timer2/0 and ADC registers
 #include "Registers.hpp"
 
-#include <Arduino.h>
-#include <Arduino_Helpers.h>
-#include <Wire.h>
+#include <Arduino.h>         // setup, loop, analogRead
+#include <Arduino_Helpers.h> // EMA.hpp
+#include <Wire.h>            // I²C slave
 
-#include <AH/Filters/EMA.hpp>
+#include <AH/Filters/EMA.hpp> // EMA filter
 
 // ------------------------------ Description ------------------------------- //
 
@@ -72,25 +72,20 @@
 
 // Print the control loop and interrupt frequencies to Serial at startup:
 constexpr bool print_frequencies = true;
-
 // Print the setpoint, actual position and control signal to Serial.
 // Note that this slows down the control loop significantly, it probably won't
 // work if you are using more than one fader without increasing
 // `interrupt_counter`.
 constexpr bool print_controller_signals = false;
 constexpr uint8_t controller_to_print = 0;
-
 // Actually drive the motors:
 constexpr bool enable_controller = true;
-
 // Follow the test reference trajectory (true) or receive the target position
 // over I²C (false):
 constexpr bool test_reference = true;
-
 // Use analog pins (A0, A1, A6, A7) instead of (A0, A1, A2, A3), useful for
 // saving digital pins on an Arduino Nano:
 constexpr bool use_A6_A7 = false;
-
 // Number of faders, must be between 1 and 4:
 constexpr size_t num_faders = 4;
 // Use phase-correct PWM (true) or fast PWM (false), this determines the timer
@@ -105,10 +100,8 @@ constexpr uint8_t interrupt_counter = 60 / (1 + phase_correct_pwm);
 constexpr unsigned prescaler_fac = 1;
 // The prescaler for the ADC, affects speed of analog readings:
 constexpr uint8_t adc_prescaler_fac = 64;
-
 // Turn off the motor after this many seconds of inactivity:
 constexpr float timeout = 2;
-
 // EMA filter factor for fader position filters:
 constexpr uint8_t ema_K = 2;
 
@@ -132,7 +125,7 @@ constexpr bool enable_overrun_indicator = num_faders < 2;
 uint16_t ADCReadManual(uint8_t idx);
 volatile int16_t adcvals[num_faders]; // Latest ADC reading (updated in ADC ISR)
 EMA<ema_K, uint16_t> filters[num_faders]; // Filters for ADC readings
-uint16_t filtered_adcval[num_faders];     // Filtered ADC readings
+uint16_t filtered_adcvals[num_faders];    // Filtered ADC readings
 
 void touchBegin();
 volatile bool touched[num_faders]; // Whether the knobs are being touched
@@ -241,8 +234,8 @@ void readAndUpdateController() {
 void setup() {
     for (uint8_t i = 0; i < num_faders; ++i) {
         adcvals[i] = -1;
-        filtered_adcval[i] = ADCReadManual(i);
-        filters[i].reset(filtered_adcval[i]);
+        filtered_adcvals[i] = ADCReadManual(i);
+        filters[i].reset(filtered_adcvals[i]);
     }
 
     if (print_frequencies || print_controller_signals) Serial.begin(1000000);
@@ -257,7 +250,7 @@ void setup() {
     if (num_faders > 3) Controller<3>::controller.setActivityTimeout(timeout);
 
     ATOMIC_BLOCK(ATOMIC_FORCEON) {
-        if (num_faders < 2) sbi(DDRB, 5); // Pin 13 output (overrun indicator)
+        if (enable_overrun_indicator) sbi(DDRB, 5); // Pin 13 output
 
         if (num_faders > 0) Motor<0>::begin();
         if (num_faders > 1) Motor<1>::begin();
@@ -284,7 +277,8 @@ void setup() {
     Wire.onRequest(onRequest);
     Wire.onReceive(onReceive);
 
-    sbi(TIMSK2, TOIE2); // Enable Timer2 overflow interrupt
+    // Enable Timer2 overflow interrupt
+    sbi(TIMSK2, TOIE2);
 }
 
 void loop() {
@@ -343,6 +337,7 @@ void touchBegin() {
 // touch_sense_stickiness ticks. If the pin never resulted in another “touched”
 // measurement during that period, the “touched” status for that pin is cleared.
 
+// Check which touch sensing knobs are being touched.
 void touchSample(uint8_t counter) {
     static uint8_t touch_timers[num_faders] {};
     if (counter == 0) {
@@ -403,7 +398,10 @@ uint16_t ADCReadManual(uint8_t idx) {
 
 // ------------------------------- Interrupts ------------------------------- //
 
+// Fires at a constant rate of `interrupt_freq`.
 ISR(TIMER2_OVF_vect) {
+    // We don't have to take all actions at each interupt, so keep a counter to
+    // know when to take what actions.
     static uint8_t counter = 0;
 
     ADCSample(counter);
@@ -413,16 +411,19 @@ ISR(TIMER2_OVF_vect) {
     if (counter == interrupt_counter) counter = 0;
 }
 
+// Fires when the ADC measurement is complete. Stores the reading, both before
+// and after filtering (for the controller and for user input respectively).
 ISR(ADC_vect) {
     if (enable_overrun_indicator && adcvals[adc_mux_idx] >= 0)
         sbi(PORTB, 5);     // Set overrun indicator
     uint16_t result = ADC; // Store ADC reading
     adcvals[adc_mux_idx] = result;
-    filtered_adcval[adc_mux_idx] = filters[adc_mux_idx](result << (6 - ema_K));
+    filtered_adcvals[adc_mux_idx] = filters[adc_mux_idx](result << (6 - ema_K));
 }
 
 // ---------------------------------- Wire ---------------------------------- //
 
+// Send the touch status and filtered fader positions to the master.
 void onRequest() {
     uint8_t touch = 0;
     if (num_faders > 0) touch |= touched[0] << 0;
@@ -431,9 +432,11 @@ void onRequest() {
     if (num_faders > 3) touch |= touched[3] << 3;
     Wire.write(touch);
     for (uint8_t i = 0; i < num_faders; ++i)
-        Wire.write(reinterpret_cast<const uint8_t *>(&filtered_adcval[i]), 2);
+        Wire.write(reinterpret_cast<const uint8_t *>(&filtered_adcvals[i]), 2);
 }
 
+// Change the setpoint of the given fader based on the value in the message
+// received from the master.
 void onReceive(int count) {
     if (count < 2) return;
     if (Wire.available() < 2) return;
