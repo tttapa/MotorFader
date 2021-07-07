@@ -83,7 +83,8 @@ constexpr uint8_t controller_to_print = 0;
 // Actually drive the motors:
 constexpr bool enable_controller = true;
 
-// Follow the test reference trajectory:
+// Follow the test reference trajectory (true) or receive the target position
+// over I²C (false):
 constexpr bool test_reference = true;
 
 // Use analog pins (A0, A1, A6, A7) instead of (A0, A1, A2, A3), useful for

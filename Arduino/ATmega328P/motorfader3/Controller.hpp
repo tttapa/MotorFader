@@ -52,7 +52,7 @@ class PID {
         int16_t newIntegral = integral + error;
         // Compute the difference between the current and the previous input,
         // but compute a weighted average using a factor α ∊ (0,1]
-        float diff = emaAlpha * input - emaAlpha * prevInput;
+        float diff = emaAlpha * (input - prevInput);
         // Update the average
         prevInput += diff;
 
