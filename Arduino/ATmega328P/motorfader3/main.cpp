@@ -8,8 +8,6 @@
 #include "Reference.hpp"
 // Helpers for low-level AVR Timer2/0 and ADC registers
 #include "Registers.hpp"
-// Capacitive touch sensing
-#include "Touch.hpp"
 
 #include <Arduino.h>
 #include <Arduino_Helpers.h>
@@ -26,10 +24,10 @@
 // Everything is driven by Timer2, which runs (by default) at a rate of
 // 31.250 kHz. This high rate is used to eliminate audible tones from the PWM
 // drive for the motor. Timer0 is used for the PWM outputs of faders 3 and 4.
-// Every 24 periods of Timer2 (768 µs), each analog input is sampled, and
+// Every 30 periods of Timer2 (960 µs), each analog input is sampled, and
 // this causes the PID control loop to run in the main loop function.
 // Capacitive sensing is implemented by measuring the RC time on the touch pin
-// in the Timer0 interrupt handler. The “touched” status is sticky for >20 ms
+// in the Timer2 interrupt handler. The “touched” status is sticky for >20 ms
 // to prevent interference from the 50 Hz mains.
 
 // -------------------------------- Hardware -------------------------------- //
@@ -79,7 +77,7 @@ constexpr bool print_frequencies = true;
 // Note that this slows down the control loop significantly, it goes from
 // 29% to >83% CPU usage.
 constexpr bool print_controller_signals = false;
-constexpr uint8_t controller_to_print = 2;
+constexpr uint8_t controller_to_print = 0;
 
 // Actually drive the motors:
 constexpr bool enable_controller = true;
@@ -97,7 +95,7 @@ constexpr size_t num_faders = 4;
 constexpr bool phase_correct_pwm = true;
 // The fader position will be sampled once per `interrupt_counter` timer
 // interrupts, this determines the sampling frequency of the control loop:
-constexpr uint8_t interrupt_counter = 72 / (1 + phase_correct_pwm);
+constexpr uint8_t interrupt_counter = 60 / (1 + phase_correct_pwm);
 // The prescaler for the timer, affects PWM and control loop frequencies:
 constexpr unsigned prescaler_fac = 1;
 // The prescaler for the ADC, affects speed of analog readings:
@@ -123,12 +121,15 @@ constexpr auto adc_prescaler = factorToADCPrescaler(adc_prescaler_fac);
 static_assert(adc_prescaler != ADCPrescaler::Invalid, "Invalid prescaler");
 constexpr float adc_freq = 1. * F_CPU / adc_prescaler_fac;
 
-// ------------------------------- ADC State -------------------------------- //
+// --------------------- ADC and Capacitive Touch State --------------------- //
 
-volatile int16_t adcval[num_faders]; // Latest ADC reading (updated in ADC ISR)
+uint16_t ADCReadManual(uint8_t idx);
+volatile int16_t adcvals[num_faders]; // Latest ADC reading (updated in ADC ISR)
 EMA<ema_K, uint16_t> filters[num_faders]; // Filters for ADC readings
 uint16_t filtered_adcval[num_faders];     // Filtered ADC readings
-uint16_t ADCReadManual(uint8_t idx);
+
+void touchBegin();
+volatile bool touched[num_faders]; // Whether the knobs are being touched
 
 // ------------------------------- Controller ------------------------------- //
 
@@ -137,6 +138,7 @@ template <uint8_t Idx>
 struct Controller {
     static PID controller;
 };
+
 template <>
 PID Controller<0>::controller {
     4,      // Kp: proportional gain
@@ -169,8 +171,6 @@ PID Controller<3>::controller {
     Ts,     // Ts: sampling time
     40,     // fc: cutoff frequency of derivative filter (Hz), zero to disable
 };
-
-volatile int16_t setpoints[num_faders];
 
 template <uint8_t Idx>
 void updateController(int16_t setpoint, int16_t adcval, bool touched) {
@@ -206,21 +206,23 @@ void updateController(int16_t setpoint, int16_t adcval, bool touched) {
     }
 }
 
+volatile int16_t setpoints[num_faders];
+
 template <uint8_t Idx>
 void readAndUpdateController() {
     int16_t adcval, setpoint;
     // Read the ADC value for the given fader:
-    ATOMIC_BLOCK(ATOMIC_FORCEON) { adcval = ::adcval[Idx]; }
+    ATOMIC_BLOCK(ATOMIC_FORCEON) { adcval = ::adcvals[Idx]; }
     // If the ADC value was updated by the ADC interrupt, run the control loop:
     if (adcval >= 0) {
         // Check if the fader knob is touched
-        bool touched = TouchSense<Idx>::touched;
+        bool touched = ::touched[Idx];
         // Read the target position
         ATOMIC_BLOCK(ATOMIC_FORCEON) { setpoint = ::setpoints[Idx]; }
         updateController<Idx>(setpoint, adcval, touched);
         // Write -1 so the controller doesn't run again until the next value is
         // available:
-        ATOMIC_BLOCK(ATOMIC_FORCEON) { ::adcval[Idx] = -1; }
+        ATOMIC_BLOCK(ATOMIC_FORCEON) { ::adcvals[Idx] = -1; }
         if (num_faders < 2) cbi(PORTB, 5); // Clear overrun indicator
     }
 }
@@ -229,7 +231,7 @@ void readAndUpdateController() {
 
 void setup() {
     for (uint8_t i = 0; i < num_faders; ++i) {
-        adcval[i] = -1;
+        adcvals[i] = -1;
         filtered_adcval[i] = ADCReadManual(i);
         filters[i].reset(filtered_adcval[i]);
     }
@@ -253,10 +255,7 @@ void setup() {
         if (num_faders > 2) Motor<2>::begin();
         if (num_faders > 3) Motor<3>::begin();
 
-        if (num_faders > 0) TouchSense<0>::begin();
-        if (num_faders > 1) TouchSense<1>::begin();
-        if (num_faders > 2) TouchSense<2>::begin();
-        if (num_faders > 3) TouchSense<3>::begin();
+        touchBegin();
     }
 
     if (print_frequencies) {
@@ -293,26 +292,64 @@ void loop() {
 constexpr float rc_time_untouched = 200e-6; // seconds
 
 // Compute the actual threshold as a number of interrupts:
-extern const int16_t touch_sense_thres =
-    interrupt_freq * rc_time_untouched * 2 / num_faders;
+constexpr uint8_t touch_sense_thres = interrupt_freq * rc_time_untouched * 2;
 // Ignore mains noise by making the “touched” status stick for longer than the
 // mains period:
 constexpr float period_50Hz = 1. / 50;
-extern const uint16_t touch_sense_stickiness =
-    interrupt_freq * period_50Hz * 1.2 / num_faders;
-// How many interrupts to discharge the pin for:
-extern const int16_t touch_sense_discharge = 10 / num_faders;
+constexpr uint8_t touch_sense_stickiness =
+    interrupt_freq * period_50Hz * 2 / interrupt_counter;
 
-void touchSample() {
-    static uint8_t counter = 0;
+// Masks of the touch pins (all on port B):
+constexpr uint8_t touch_masks[] = {
+    1 << 0,
+    1 << 1,
+    1 << 2,
+    1 << 4,
+};
+constexpr uint8_t touch_mask = (num_faders > 0 ? touch_masks[0] : 0) |
+                               (num_faders > 1 ? touch_masks[1] : 0) |
+                               (num_faders > 2 ? touch_masks[2] : 0) |
+                               (num_faders > 3 ? touch_masks[3] : 0);
 
-    if (num_faders > 0 && counter == 0) TouchSense<0>::update();
-    if (num_faders > 1 && counter == 1) TouchSense<1>::update();
-    if (num_faders > 2 && counter == 2) TouchSense<2>::update();
-    if (num_faders > 3 && counter == 3) TouchSense<3>::update();
+void touchBegin() {
+    PORTB &= ~touch_mask; // low
+    DDRB |= touch_mask;   // output mode
+}
 
-    ++counter;
-    if (counter == num_faders) counter = 0;
+// 0. The pin mode is “output”, the value is “low”.
+// 1. Set the pin mode to “input”, touch_timer = 0.
+// 2. The pin will start charging through the external pull-up resistor.
+// 3. After a fixed amount of time, check whether the pin became “high”:
+//    if this is the case, the RC-time of the knob/pull-up resistor circuit
+//    was smaller than the given threshold. Since R is fixed, this can be used
+//    to infer C, the capacitance of the knob: if the capacitance is lower than
+//    the threshold (i.e. RC-time is lower), this means the knob was not touched.
+// 5. Set the pin mode to “output”, to start discharging the pin to 0V again.
+// 6. Some time later, the pin has discharged, so switch to “input” mode and
+//    start charging again for the next RC-time measurement.
+//
+// The “touched” status is sticky: it will remain set for at least
+// touch_sense_stickiness ticks. If the pin never resulted in another “touched”
+// measurement during that period, the “touched” status for that pin is cleared.
+
+void touchSample(uint8_t counter) {
+    static uint8_t touch_timers[num_faders] {};
+    if (counter == 0) {
+        DDRB &= ~touch_mask; // input mode, start charging
+    } else if (counter == touch_sense_thres) {
+        uint8_t touched_bits = PINB;
+        DDRB |= touch_mask; // output mode, start discharging
+        for (uint8_t i = 0; i < num_faders; ++i) {
+            bool touch_i = (touched_bits & touch_masks[i]) == 0;
+            if (touch_i) {
+                touch_timers[i] = touch_sense_stickiness;
+                touched[i] = true;
+            } else if (touch_timers[i] > 0) {
+                --touch_timers[i];
+                if (touch_timers[i] == 0) touched[i] = false;
+            }
+        }
+    }
 }
 
 // ---------------------------------- ADC ----------------------------------- //
@@ -337,10 +374,8 @@ constexpr float adc_rate = interrupt_freq / adc_start_count;
 // to actually do the conversion.
 static_assert(adc_rate <= adc_freq / 14, "ADC too slow");
 
-// Enable the ADC trigger every `interrupt_counter` calls.
-void ADCSample() {
-    static uint8_t counter = 0;
-
+// Start an ADC conversion at the right intervals.
+void ADCSample(uint8_t counter) {
     if (num_faders > 0 && counter == 0 * adc_start_count)
         ADCStartConversion(0);
     else if (num_faders > 1 && counter == 1 * adc_start_count)
@@ -349,9 +384,6 @@ void ADCSample() {
         ADCStartConversion(2);
     else if (num_faders > 3 && counter == 3 * adc_start_count)
         ADCStartConversion(3);
-
-    ++counter;
-    if (counter == interrupt_counter) counter = 0;
 }
 
 uint16_t ADCReadManual(uint8_t idx) {
@@ -361,15 +393,20 @@ uint16_t ADCReadManual(uint8_t idx) {
 // ------------------------------- Interrupts ------------------------------- //
 
 ISR(TIMER2_OVF_vect) {
-    ADCSample();
-    touchSample();
+    static uint8_t counter = 0;
+
+    ADCSample(counter);
+    touchSample(counter);
+
+    ++counter;
+    if (counter == interrupt_counter) counter = 0;
 }
 
 ISR(ADC_vect) {
-    if (num_faders < 2 && adcval[adc_mux_idx] >= 0)
+    if (num_faders < 2 && adcvals[adc_mux_idx] >= 0)
         sbi(PORTB, 5);     // Set overrun indicator
     uint16_t result = ADC; // Store ADC reading
-    adcval[adc_mux_idx] = result;
+    adcvals[adc_mux_idx] = result;
     filtered_adcval[adc_mux_idx] = filters[adc_mux_idx](result << (6 - ema_K));
 }
 
@@ -377,10 +414,10 @@ ISR(ADC_vect) {
 
 void onRequest() {
     uint8_t touch = 0;
-    if (num_faders > 0) touch |= TouchSense<0>::touched << 0;
-    if (num_faders > 1) touch |= TouchSense<1>::touched << 1;
-    if (num_faders > 2) touch |= TouchSense<2>::touched << 2;
-    if (num_faders > 3) touch |= TouchSense<3>::touched << 3;
+    if (num_faders > 0) touch |= touched[0] << 0;
+    if (num_faders > 1) touch |= touched[1] << 1;
+    if (num_faders > 2) touch |= touched[2] << 2;
+    if (num_faders > 3) touch |= touched[3] << 3;
     Wire.write(touch);
     for (uint8_t i = 0; i < num_faders; ++i)
         Wire.write(reinterpret_cast<const uint8_t *>(&filtered_adcval[i]), 2);
