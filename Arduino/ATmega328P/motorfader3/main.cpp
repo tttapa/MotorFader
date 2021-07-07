@@ -125,6 +125,7 @@ constexpr float interrupt_freq =
 constexpr auto adc_prescaler = factorToADCPrescaler(adc_prescaler_fac);
 static_assert(adc_prescaler != ADCPrescaler::Invalid, "Invalid prescaler");
 constexpr float adc_freq = 1. * F_CPU / adc_prescaler_fac;
+constexpr bool enable_overrun_indicator = num_faders < 2;
 
 // --------------------- ADC and Capacitive Touch State --------------------- //
 
@@ -231,7 +232,7 @@ void readAndUpdateController() {
         // Write -1 so the controller doesn't run again until the next value is
         // available:
         ATOMIC_BLOCK(ATOMIC_FORCEON) { ::adcvals[Idx] = -1; }
-        if (num_faders < 2) cbi(PORTB, 5); // Clear overrun indicator
+        if (enable_overrun_indicator) cbi(PORTB, 5); // Clear overrun indicator
     }
 }
 
@@ -413,7 +414,7 @@ ISR(TIMER2_OVF_vect) {
 }
 
 ISR(ADC_vect) {
-    if (num_faders < 2 && adcvals[adc_mux_idx] >= 0)
+    if (enable_overrun_indicator && adcvals[adc_mux_idx] >= 0)
         sbi(PORTB, 5);     // Set overrun indicator
     uint16_t result = ADC; // Store ADC reading
     adcvals[adc_mux_idx] = result;
