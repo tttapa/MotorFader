@@ -74,13 +74,17 @@
 constexpr bool print_frequencies = true;
 
 // Print the setpoint, actual position and control signal to Serial.
-// Note that this slows down the control loop significantly, it goes from
-// 29% to >83% CPU usage.
+// Note that this slows down the control loop significantly, it probably won't
+// work if you are using more than one fader without increasing
+// `interrupt_counter`.
 constexpr bool print_controller_signals = false;
 constexpr uint8_t controller_to_print = 0;
 
 // Actually drive the motors:
 constexpr bool enable_controller = true;
+
+// Follow the test reference trajectory:
+constexpr bool test_reference = true;
 
 // Use analog pins (A0, A1, A6, A7) instead of (A0, A1, A2, A3), useful for
 // saving digital pins on an Arduino Nano:
@@ -218,7 +222,10 @@ void readAndUpdateController() {
         // Check if the fader knob is touched
         bool touched = ::touched[Idx];
         // Read the target position
-        ATOMIC_BLOCK(ATOMIC_FORCEON) { setpoint = ::setpoints[Idx]; }
+        if (test_reference)
+            setpoint = getNextSetpoint<Idx>(16);
+        else
+            ATOMIC_BLOCK(ATOMIC_FORCEON) { setpoint = ::setpoints[Idx]; }
         updateController<Idx>(setpoint, adcval, touched);
         // Write -1 so the controller doesn't run again until the next value is
         // available:
@@ -289,7 +296,7 @@ void loop() {
 
 // Increase this time constant if the capacitive touch sense is too sensitive or
 // decrease it if it's not sensitive enough:
-constexpr float rc_time_untouched = 200e-6; // seconds
+constexpr float rc_time_untouched = 100e-6; // seconds
 
 // Compute the actual threshold as a number of interrupts:
 constexpr uint8_t touch_sense_thres = interrupt_freq * rc_time_untouched * 2;
@@ -298,6 +305,8 @@ constexpr uint8_t touch_sense_thres = interrupt_freq * rc_time_untouched * 2;
 constexpr float period_50Hz = 1. / 50;
 constexpr uint8_t touch_sense_stickiness =
     interrupt_freq * period_50Hz * 2 / interrupt_counter;
+
+static_assert(touch_sense_thres < interrupt_counter, "Threshold too high");
 
 // Masks of the touch pins (all on port B):
 constexpr uint8_t touch_masks[] = {
