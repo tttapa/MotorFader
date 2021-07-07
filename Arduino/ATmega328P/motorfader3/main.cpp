@@ -236,7 +236,7 @@ void readAndUpdateController() {
     }
 }
 
-// ------------------------------- Main Loop -------------------------------- //
+// ------------------------------ Setup & Loop ------------------------------ //
 
 void setup() {
     for (uint8_t i = 0; i < num_faders; ++i) {
@@ -312,10 +312,10 @@ static_assert(touch_sense_thres < interrupt_counter, "Threshold too high");
 
 // Masks of the touch pins (all on port B):
 constexpr uint8_t touch_masks[] = {
-    1 << 0,
-    1 << 1,
-    1 << 2,
-    1 << 4,
+    1 << PB0,
+    1 << PB1,
+    1 << PB2,
+    1 << PB4,
 };
 constexpr uint8_t touch_mask = (num_faders > 0 ? touch_masks[0] : 0) |
                                (num_faders > 1 ? touch_masks[1] : 0) |
