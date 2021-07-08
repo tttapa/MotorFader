@@ -311,7 +311,7 @@ constexpr uint8_t touch_sense_thres = interrupt_freq * rc_time_untouched * 2;
 // mains period:
 constexpr float period_50Hz = 1. / 50;
 constexpr uint8_t touch_sense_stickiness =
-    interrupt_freq * period_50Hz * 2 / interrupt_counter;
+    interrupt_freq * period_50Hz * 6 / interrupt_counter;
 
 static_assert(touch_sense_thres < interrupt_counter, "Threshold too high");
 
