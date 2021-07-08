@@ -1,5 +1,7 @@
 #pragma once
 
+#include <Arduino_Helpers.h>
+
 #include <AH/Math/Divide.hpp>
 #include <AH/STL/algorithm> // std::fill
 #include <AH/STL/cstdint>
