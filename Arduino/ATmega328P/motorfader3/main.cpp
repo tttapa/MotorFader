@@ -13,6 +13,7 @@
 #include <Arduino_Helpers.h> // EMA.hpp
 #include <Wire.h>            // I²C slave
 
+#include "SMA.hpp"
 #include <AH/Filters/EMA.hpp> // EMA filter
 
 // ------------------------------ Description ------------------------------- //
@@ -104,6 +105,10 @@ constexpr uint8_t adc_prescaler_fac = 64;
 constexpr float timeout = 2;
 // EMA filter factor for fader position filters:
 constexpr uint8_t ema_K = 2;
+// SMA filter length for setpoint filters, improves tracking of ramps if the
+// setpoint changes in steps (e.g. when the DAW only updates the reference every
+// 20 ms). Powers of two are significantly faster:
+constexpr uint8_t setpoint_sma_length = 32;
 
 // -------------------------- Computed Quantities --------------------------- //
 
@@ -138,15 +143,15 @@ struct Controller {
     static PID controller;
 };
 
-template <>
+template <> // This is an example of a controller with very little overshoot
 PID Controller<0>::controller {
-    4,      // Kp: proportional gain
-    11,     // Ki: integral gain
+    5,      // Kp: proportional gain
+    2,      // Ki: integral gain
     -0.028, // Kd: derivative gain
     Ts,     // Ts: sampling time
     40,     // fc: cutoff frequency of derivative filter (Hz), zero to disable
 };
-template <>
+template <> // This one has more overshoot, but less ramp tracking error
 PID Controller<1>::controller {
     4,      // Kp: proportional gain
     11,     // Ki: integral gain
@@ -172,14 +177,20 @@ PID Controller<3>::controller {
 };
 
 template <uint8_t Idx>
-void updateController(int16_t setpoint, int16_t adcval, bool touched) {
+void updateController(uint16_t setpoint, int16_t adcval, bool touched) {
     auto &controller = Controller<Idx>::controller;
 
     // Prevent the motor from being turned off after begin touched
     if (touched) controller.resetActivityCounter();
 
     // Set the target position
-    controller.setSetpoint(setpoint);
+    if (setpoint_sma_length > 0) {
+        static SMA<setpoint_sma_length, uint16_t, uint32_t> setpointfilt;
+        uint16_t filtsetpoint = setpointfilt(setpoint);
+        controller.setSetpoint(filtsetpoint);
+    } else {
+        controller.setSetpoint(setpoint);
+    }
 
     // Update the PID controller to get the control action
     int16_t control = controller.update(adcval);

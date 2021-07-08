@@ -44,12 +44,12 @@ class PID {
 
     /// Update the controller: given the current position, compute the control
     /// action.
-    float update(int16_t input) {
+    float update(uint16_t input) {
         // The error is the difference between the reference (setpoint) and the
         // actual position (input)
         int16_t error = setpoint - input;
         // The integral or sum of current and previous errors
-        int16_t newIntegral = integral + error;
+        int32_t newIntegral = integral + error;
         // Compute the difference between the current and the previous input,
         // but compute a weighted average using a factor α ∊ (0,1]
         float diff = emaAlpha * (input - prevInput);
@@ -57,14 +57,18 @@ class PID {
         prevInput += diff;
 
         // Check if we can turn off the motor
-        if (activityCount > activityThres && activityThres) {
+        if (activityCount >= activityThres && activityThres) {
             float filtError = setpoint - prevInput;
-            if (filtError >= -1 && filtError <= 1) {
+            if (filtError >= -errThres && filtError <= errThres) {
+                errThres = 2; // hysteresis
                 integral = newIntegral;
                 return 0;
+            } else {
+                errThres = 1;
             }
         } else {
             ++activityCount;
+            errThres = 1;
         }
 
         // Standard PID rule
@@ -114,12 +118,12 @@ class PID {
     void setEMACutoff(float f_c) { emaAlpha = calcAlphaEMA(f_c); }
 
     /// Set the reference/target/setpoint of the controller.
-    void setSetpoint(int16_t setpoint) {
+    void setSetpoint(uint16_t setpoint) {
         if (this->setpoint != setpoint) this->activityCount = 0;
         this->setpoint = setpoint;
     }
     /// @see @ref setSetpoint(int16_t)
-    int16_t getSetpoint() const { return setpoint; }
+    uint16_t getSetpoint() const { return setpoint; }
 
     /// Set the maximum control output magnitude. Default is 255, which clamps
     /// the control output in [-255, +255].
@@ -148,6 +152,7 @@ class PID {
     float prevInput = 0;        ///< (Filtered) previous input for derivative.
     uint16_t activityCount = 0; ///< How many ticks since last setpoint change.
     uint16_t activityThres = 0; ///< Threshold for turning off the output.
-    int16_t integral = 0;       ///< Sum of previous errors for integral.
-    int16_t setpoint = 0;       ///< Position reference.
+    uint8_t errThres = 1;       ///< Threshold with hysteresis.
+    int32_t integral = 0;       ///< Sum of previous errors for integral.
+    uint16_t setpoint = 0;      ///< Position reference.
 };
