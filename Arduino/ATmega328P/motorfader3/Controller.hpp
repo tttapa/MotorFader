@@ -52,9 +52,9 @@ class PID {
         int32_t newIntegral = integral + error;
         // Compute the difference between the current and the previous input,
         // but compute a weighted average using a factor α ∊ (0,1]
-        float diff = emaAlpha * (input - prevInput);
+        float diff = emaAlpha * (prevInput - input);
         // Update the average
-        prevInput += diff;
+        prevInput -= diff;
 
         // Check if we can turn off the motor
         if (activityCount >= activityThres && activityThres) {
@@ -141,6 +141,9 @@ class PID {
         else
             activityThres = s / Ts == 0 ? 1 : s / Ts;
     }
+
+    /// Reset the sum of the previous errors to zero.
+    void resetIntegral() { integral = 0; }
 
   private:
     float Ts = 1;               ///< Sampling time (seconds)
