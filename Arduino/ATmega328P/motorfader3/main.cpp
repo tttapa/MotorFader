@@ -6,8 +6,10 @@
 #include "Motor.hpp"
 // Reference signal for testing the performance of the controller:
 #include "Reference.hpp"
-// Helpers for low-level AVR Timer2/0 and ADC registers
+// Helpers for low-level AVR Timer2/0 and ADC registers:
 #include "Registers.hpp"
+// Parsing incoming messages over Serial using SLIP packets:
+#include "SerialSLIP.hpp"
 
 #include <Arduino.h>         // setup, loop, analogRead
 #include <Arduino_Helpers.h> // EMA.hpp
@@ -30,6 +32,11 @@
 // Capacitive sensing is implemented by measuring the RC time on the touch pin
 // in the Timer2 interrupt handler. The “touched” status is sticky for >20 ms
 // to prevent interference from the 50 Hz mains.
+//
+// There are options to follow a test reference (with ramps and jumps), to
+// receive a target position over I²C, or to run experiments based on commands
+// from the serial port. The latter is used by a Python script that performs
+// experiments with different tuning parameters for the controllers.
 
 // -------------------------------- Hardware -------------------------------- //
 
@@ -83,12 +90,14 @@ constexpr uint8_t controller_to_print = 0;
 constexpr bool enable_controller = true;
 // Follow the test reference trajectory (true) or receive the target position
 // over I²C (false):
-constexpr bool test_reference = true;
+constexpr bool test_reference = false;
+// Allow control for tuning and starting experiments over Serial:
+constexpr bool serial_control = true;
 // Use analog pins (A0, A1, A6, A7) instead of (A0, A1, A2, A3), useful for
 // saving digital pins on an Arduino Nano:
 constexpr bool use_A6_A7 = false;
 // Number of faders, must be between 1 and 4:
-constexpr size_t num_faders = 4;
+constexpr size_t num_faders = 1;
 // Use phase-correct PWM (true) or fast PWM (false), this determines the timer
 // interrupt frequency, prefer phase-correct PWM with prescaler 1 on 16 MHz
 // boards, and fast PWM with prescaler 1 on 8 MHz boards, both result in a PWM
@@ -135,50 +144,72 @@ uint16_t filtered_adcvals[num_faders];    // Filtered ADC readings
 void touchBegin();
 volatile bool touched[num_faders]; // Whether the knobs are being touched
 
-// ------------------------------- Controller ------------------------------- //
+// ------------------------------ Controllers ------------------------------- //
 
 // The main PID controllers. Need tuning for your specific setup:
-template <uint8_t Idx>
-struct Controller {
-    static PID controller;
+
+PID controllers[] {
+    // This is an example of a controller with very little overshoot
+    {
+        5,     // Kp: proportional gain
+        2,     // Ki: integral gain
+        0.028, // Kd: derivative gain
+        Ts,    // Ts: sampling time
+        40, // fc: cutoff frequency of derivative filter (Hz), zero to disable
+    },
+    // This one has more overshoot, but less ramp tracking error
+    {
+        4,     // Kp: proportional gain
+        11,    // Ki: integral gain
+        0.028, // Kd: derivative gain
+        Ts,    // Ts: sampling time
+        40, // fc: cutoff frequency of derivative filter (Hz), zero to disable
+    },
+    // This is a very aggressive controller
+    {
+        8.55,  // Kp: proportional gain
+        440,   // Ki: integral gain
+        0.043, // Kd: derivative gain
+        Ts,    // Ts: sampling time
+        70, // fc: cutoff frequency of derivative filter (Hz), zero to disable
+    },
+    // Fourth controller
+    {
+        4,     // Kp: proportional gain
+        11,    // Ki: integral gain
+        0.028, // Kd: derivative gain
+        Ts,    // Ts: sampling time
+        40, // fc: cutoff frequency of derivative filter (Hz), zero to disable
+    },
 };
 
-template <> // This is an example of a controller with very little overshoot
-PID Controller<0>::controller {
-    5,      // Kp: proportional gain
-    2,      // Ki: integral gain
-    -0.028, // Kd: derivative gain
-    Ts,     // Ts: sampling time
-    40,     // fc: cutoff frequency of derivative filter (Hz), zero to disable
-};
-template <> // This one has more overshoot, but less ramp tracking error
-PID Controller<1>::controller {
-    4,      // Kp: proportional gain
-    11,     // Ki: integral gain
-    -0.028, // Kd: derivative gain
-    Ts,     // Ts: sampling time
-    40,     // fc: cutoff frequency of derivative filter (Hz), zero to disable
-};
-template <>
-PID Controller<2>::controller {
-    4,      // Kp: proportional gain
-    11,     // Ki: integral gain
-    -0.028, // Kd: derivative gain
-    Ts,     // Ts: sampling time
-    40,     // fc: cutoff frequency of derivative filter (Hz), zero to disable
-};
-template <>
-PID Controller<3>::controller {
-    4,      // Kp: proportional gain
-    11,     // Ki: integral gain
-    -0.028, // Kd: derivative gain
-    Ts,     // Ts: sampling time
-    40,     // fc: cutoff frequency of derivative filter (Hz), zero to disable
-};
+// Tuning experiments:
+float serial_experiment_speed[num_faders];
+// Setpoints (target positions) for all faders (updated in I²C interrupt):
+volatile int16_t setpoints[num_faders];
+
+template <uint8_t Idx>
+void printControllerSignals(int16_t setpoint, int16_t adcval, int16_t control) {
+    // Send (binary) controller signals over Serial to plot in Python
+    if (serial_control && serial_experiment_speed[Idx] > 0) {
+        const int16_t data[3] {setpoint, adcval, control};
+        SLIPSender(Serial).writePacket(reinterpret_cast<const uint8_t *>(data),
+                                       sizeof(data));
+    }
+    // Print signals as text
+    else if (print_controller_signals && Idx == controller_to_print) {
+        Serial.print(setpoint);
+        Serial.print('\t');
+        Serial.print(adcval);
+        Serial.print('\t');
+        Serial.print((control + 256) * 2);
+        Serial.println();
+    }
+}
 
 template <uint8_t Idx>
 void updateController(uint16_t setpoint, int16_t adcval, bool touched) {
-    auto &controller = Controller<Idx>::controller;
+    auto &controller = controllers[Idx];
 
     // Prevent the motor from being turned off after begin touched
     if (touched) controller.resetActivityCounter();
@@ -205,18 +236,8 @@ void updateController(uint16_t setpoint, int16_t adcval, bool touched) {
             Motor<Idx>::backward(-control);
     }
 
-    // Print status
-    if (print_controller_signals && Idx == controller_to_print) {
-        Serial.print(controller.getSetpoint());
-        Serial.print('\t');
-        Serial.print(adcval);
-        Serial.print('\t');
-        Serial.print((control + 256) * 2);
-        Serial.println();
-    }
+    printControllerSignals<Idx>(controller.getSetpoint(), adcval, control);
 }
-
-volatile int16_t setpoints[num_faders];
 
 template <uint8_t Idx>
 void readAndUpdateController() {
@@ -229,8 +250,14 @@ void readAndUpdateController() {
         bool touched = ::touched[Idx];
         // Read the target position
         if (test_reference)
+            // from the test reference
             setpoint = getNextSetpoint<Idx>(16);
+        else if (serial_control && serial_experiment_speed[Idx] > 0)
+            // from the tuning experiment reference
+            setpoint =
+                getNextExperimentSetpoint<Idx>(serial_experiment_speed[Idx]);
         else
+            // from the I²C master
             ATOMIC_BLOCK(ATOMIC_FORCEON) { setpoint = ::setpoints[Idx]; }
         updateController<Idx>(setpoint, adcval, touched);
         // Write -1 so the controller doesn't run again until the next value is
@@ -243,22 +270,21 @@ void readAndUpdateController() {
 // ------------------------------ Setup & Loop ------------------------------ //
 
 void setup() {
+    // Initialize some globals
     for (uint8_t i = 0; i < num_faders; ++i) {
         adcvals[i] = -1;
         filtered_adcvals[i] = ADCReadManual(i);
         filters[i].reset(filtered_adcvals[i]);
+        controllers[i].setActivityTimeout(timeout);
     }
 
-    if (print_frequencies || print_controller_signals) Serial.begin(1000000);
+    // Configure the hardware
+    if (print_frequencies || print_controller_signals || serial_control)
+        Serial.begin(1000000);
 
     setupADC(adc_prescaler);
     if (num_faders > 0) setupMotorTimer2(phase_correct_pwm, prescaler2);
     if (num_faders > 2) setupMotorTimer0(phase_correct_pwm, prescaler0);
-
-    if (num_faders > 0) Controller<0>::controller.setActivityTimeout(timeout);
-    if (num_faders > 1) Controller<1>::controller.setActivityTimeout(timeout);
-    if (num_faders > 2) Controller<2>::controller.setActivityTimeout(timeout);
-    if (num_faders > 3) Controller<3>::controller.setActivityTimeout(timeout);
 
     ATOMIC_BLOCK(ATOMIC_FORCEON) {
         if (enable_overrun_indicator) sbi(DDRB, 5); // Pin 13 output
@@ -278,6 +304,7 @@ void setup() {
         Serial.println(Ts * 1e6);
     }
     if (print_controller_signals) {
+        Serial.println(F("\r\nReference\tActual\tControl\t-"));
         Serial.println(F("0\t0\t0\t0\r\n0\t0\t0\t1024"));
     }
 
@@ -297,6 +324,8 @@ void loop() {
     if (num_faders > 1) readAndUpdateController<1>();
     if (num_faders > 2) readAndUpdateController<2>();
     if (num_faders > 3) readAndUpdateController<3>();
+    void updateSerialIn();
+    if (serial_control) updateSerialIn();
 }
 
 // ---------------------------- Capacitive Touch ---------------------------- //
@@ -459,4 +488,65 @@ void onReceive(int count) {
     if (num_faders > 1 && idx == 1) setpoints[1] = data;
     if (num_faders > 2 && idx == 2) setpoints[2] = data;
     if (num_faders > 3 && idx == 3) setpoints[3] = data;
+}
+
+// ---------------------------------- Serial -------------------------------- //
+
+// Read SLIP messages from the serial port that allow dynamically updating the
+// tuning of the controllers. This is used by the Python tuning script.
+//
+// Message format: <command> <fader> <value>
+// Commands:
+//   - p: proportional gain Kp
+//   - i: integral gain Ki
+//   - d: derivative gain Kd
+//   - c: derivative filter cutoff frequency f_c (Hz)
+//   - m: maximum absolute control output
+//   - s: start an experiment, using getNextExperimentSetpoint
+// Fader index: up to four faders are addressed using the characters '0' - '3'.
+// Values: values are sent as 32-bit little Endian floating point numbers.
+//
+// For example the message 'c0\x00\x00\x20\x42' sets the derivative filter
+// cutoff frequency of the first fader to 40.
+void updateSerialIn() {
+    static SLIPParser parser;
+    static char cmd = '\0';
+    static uint8_t fader_idx = 0;
+    static uint8_t buf[4];
+    static_assert(sizeof(buf) == sizeof(float), "");
+    // Function is called if a new byte of the message arrives:
+    auto on_char_receive = [&](char c, size_t c_idx) {
+        if (c_idx == 0) {
+            cmd = c;
+        } else if (c_idx == 1) {
+            fader_idx = c - '0';
+        } else if (c_idx < 6) {
+            buf[c_idx - 2] = c;
+        }
+    };
+    // Convert the 4-byte buffer to a float:
+    auto as_f32 = [&] {
+        float f;
+        memcpy(&f, buf, sizeof(float));
+        return f;
+    };
+    // Read and parse incoming packets from Serial:
+    while (Serial.available() > 0) {
+        uint8_t c = Serial.read();
+        auto msg_size = parser.parse(c, on_char_receive);
+        if (msg_size == 6 && fader_idx < num_faders) {
+            switch (cmd) {
+                case 'p': controllers[fader_idx].setKp(as_f32()); break;
+                case 'i': controllers[fader_idx].setKi(as_f32()); break;
+                case 'd': controllers[fader_idx].setKd(as_f32()); break;
+                case 'c': controllers[fader_idx].setEMACutoff(as_f32()); break;
+                case 'm': controllers[fader_idx].setMaxOutput(as_f32()); break;
+                case 's':
+                    serial_experiment_speed[fader_idx] = as_f32();
+                    controllers[fader_idx].resetIntegral();
+                    break;
+                default: break;
+            }
+        }
+    }
 }

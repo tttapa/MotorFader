@@ -217,3 +217,47 @@ inline uint16_t getNextSetpoint(uint8_t speed_fac) {
     }
     return setpoint;
 }
+
+template <uint8_t>
+inline uint16_t getNextExperimentSetpoint(float &speed) {
+    static uint32_t index = 0;
+
+    constexpr uint16_t rampup = 0xFFFF;
+    constexpr uint16_t rampdown = 0xFFFE;
+    struct TestSeq {
+        uint16_t setpoint;
+        uint32_t duration;
+    };
+    constexpr TestSeq seqs[] {
+        {0, 256},  {rampup, 128}, {1023, 32}, {0, 64},    {333, 32},
+        {666, 32}, {333, 32},     {0, 32},    {512, 256},
+    };
+
+    uint16_t setpoint = 0xFFFF;
+    uint32_t start = 0;
+    for (uint8_t i = 0; i < len(seqs); ++i) {
+        uint32_t duration = seqs[i].duration * speed;
+        uint16_t setpoint_i = seqs[i].setpoint;
+        uint32_t end = start + duration;
+        if (index < end) {
+            if (setpoint_i == rampup) {
+                setpoint = 1024 * (index - start) / duration;
+            } else if (setpoint_i == rampdown) {
+                setpoint = 1023 - 1024 * (index - start) / duration;
+            } else {
+                setpoint = setpoint_i;
+            }
+            break;
+        }
+        start = end;
+    }
+
+    if (setpoint == 0xFFFF) {
+        index = 0;
+        speed = 0;
+        return 0;
+    }
+
+    ++index;
+    return setpoint;
+}
