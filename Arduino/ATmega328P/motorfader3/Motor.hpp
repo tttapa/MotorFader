@@ -27,32 +27,57 @@ inline void setupMotorTimer2(bool phase_correct, Timer2Prescaler prescaler) {
     }
 }
 
-template <uint8_t Idx>
-struct Motor {
-    static void begin();
-    static void forward(uint8_t speed);
-    static void backward(uint8_t speed);
+/// Configure the timers for the PWM outputs.
+template <class Config>
+inline void setupMotorTimers() {
+    constexpr auto prescaler0 = factorToTimer0Prescaler(Config::prescaler_fac);
+    static_assert(prescaler0 != Timer0Prescaler::Invalid, "Invalid prescaler");
+    constexpr auto prescaler2 = factorToTimer2Prescaler(Config::prescaler_fac);
+    static_assert(prescaler2 != Timer2Prescaler::Invalid, "Invalid prescaler");
+
+    if (Config::num_faders > 0)
+        setupMotorTimer2(Config::phase_correct_pwm, prescaler2);
+    if (Config::num_faders > 2)
+        setupMotorTimer0(Config::phase_correct_pwm, prescaler0);
+}
+
+template <class Config>
+struct Motors {
+    void begin();
+    template <uint8_t Idx>
+    void setSpeed(int16_t speed);
+
+    template <uint8_t Idx>
+    void setupGPIO();
+    template <uint8_t Idx>
+    void forward(uint8_t speed);
+    template <uint8_t Idx>
+    void backward(uint8_t speed);
 };
 
-template <>
-inline void Motor<0>::begin() {
-    sbi(DDRD, 2);
-    sbi(DDRD, 3);
-}
-template <>
-inline void Motor<1>::begin() {
-    sbi(DDRB, 5);
-    sbi(DDRB, 3);
-}
-template <>
-inline void Motor<2>::begin() {
-    sbi(DDRD, 4);
-    sbi(DDRD, 5);
-}
-template <>
-inline void Motor<3>::begin() {
-    sbi(DDRD, 7);
-    sbi(DDRD, 6);
+template <class Config>
+inline void Motors<Config>::begin() {
+    setupMotorTimers<Config>();
+
+    if (Config::num_faders > 0) {
+        sbi(DDRD, 2);
+        sbi(DDRD, 3);
+    }
+    if (Config::num_faders > 1) {
+        if (Config::fader_1_A2)
+            sbi(DDRC, 2);
+        else
+            sbi(DDRB, 5);
+        sbi(DDRB, 3);
+    }
+    if (Config::num_faders > 2) {
+        sbi(DDRD, 4);
+        sbi(DDRD, 5);
+    }
+    if (Config::num_faders > 3) {
+        sbi(DDRD, 7);
+        sbi(DDRD, 6);
+    }
 }
 
 // Fast PWM (Table 14-6):
@@ -60,37 +85,38 @@ inline void Motor<3>::begin() {
 // Phase Correct PWM (Table 14-7):
 //   Clear OC0B on compare match when up-counting. Set OC0B on compare match
 //   when down-counting.
-template <>
-inline void Motor<0>::forward(uint8_t speed) {
-    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-        cbi(TCCR2A, COM2B0);
-        cbi(PORTD, 2);
-        OCR2B = speed;
-    }
-}
-template <>
-inline void Motor<1>::forward(uint8_t speed) {
-    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-        cbi(TCCR2A, COM2A0);
-        cbi(PORTB, 5);
-        OCR2A = speed;
-    }
-}
-template <>
-inline void Motor<2>::forward(uint8_t speed) {
-    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-        cbi(TCCR0A, COM0B0);
-        cbi(PORTD, 4);
-        OCR0B = speed;
-    }
-}
-template <>
-inline void Motor<3>::forward(uint8_t speed) {
-    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-        cbi(TCCR0A, COM0A0);
-        cbi(PORTD, 7);
-        OCR0A = speed;
-    }
+template <class Config>
+template <uint8_t Idx>
+inline void Motors<Config>::forward(uint8_t speed) {
+    if (Idx >= Config::num_faders)
+        return;
+    else if (Idx == 0)
+        ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+            cbi(TCCR2A, COM2B0);
+            cbi(PORTD, 2);
+            OCR2B = speed;
+        }
+    else if (Idx == 1)
+        ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+            cbi(TCCR2A, COM2A0);
+            if (Config::fader_1_A2)
+                cbi(PORTC, 2);
+            else
+                cbi(PORTB, 5);
+            OCR2A = speed;
+        }
+    else if (Idx == 2)
+        ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+            cbi(TCCR0A, COM0B0);
+            cbi(PORTD, 4);
+            OCR0B = speed;
+        }
+    else if (Idx == 3)
+        ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+            cbi(TCCR0A, COM0A0);
+            cbi(PORTD, 7);
+            OCR0A = speed;
+        }
 }
 
 // Fast PWM (Table 14-6):
@@ -98,35 +124,45 @@ inline void Motor<3>::forward(uint8_t speed) {
 // Phase Correct PWM (Table 14-7):
 //   Set OC0B on compare match when up-counting. Clear OC0B on compare match
 //   when down-counting.
-template <>
-inline void Motor<0>::backward(uint8_t speed) {
-    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-        sbi(TCCR2A, COM2B0);
-        sbi(PORTD, 2);
-        OCR2B = speed;
-    }
+template <class Config>
+template <uint8_t Idx>
+inline void Motors<Config>::backward(uint8_t speed) {
+    if (Idx >= Config::num_faders)
+        return;
+    else if (Idx == 0)
+        ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+            sbi(TCCR2A, COM2B0);
+            sbi(PORTD, 2);
+            OCR2B = speed;
+        }
+    else if (Idx == 1)
+        ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+            sbi(TCCR2A, COM2A0);
+            if (Config::fader_1_A2)
+                sbi(PORTC, 2);
+            else
+                sbi(PORTB, 5);
+            OCR2A = speed;
+        }
+    else if (Idx == 2)
+        ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+            sbi(TCCR0A, COM0B0);
+            sbi(PORTD, 4);
+            OCR0B = speed;
+        }
+    else if (Idx == 3)
+        ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+            sbi(TCCR0A, COM0A0);
+            sbi(PORTD, 7);
+            OCR0A = speed;
+        }
 }
-template <>
-inline void Motor<1>::backward(uint8_t speed) {
-    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-        sbi(TCCR2A, COM2A0);
-        sbi(PORTB, 5);
-        OCR2A = speed;
-    }
-}
-template <>
-inline void Motor<2>::backward(uint8_t speed) {
-    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-        sbi(TCCR0A, COM0B0);
-        sbi(PORTD, 4);
-        OCR0B = speed;
-    }
-}
-template <>
-inline void Motor<3>::backward(uint8_t speed) {
-    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-        sbi(TCCR0A, COM0A0);
-        sbi(PORTD, 7);
-        OCR0A = speed;
-    }
+
+template <class Config>
+template <uint8_t Idx>
+inline void Motors<Config>::setSpeed(int16_t speed) {
+    if (speed >= 0)
+        forward<Idx>(speed);
+    else
+        backward<Idx>(-speed);
 }

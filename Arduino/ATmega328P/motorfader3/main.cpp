@@ -1,5 +1,7 @@
 // Configuration and initialization of the analog-to-digital converter:
 #include "ADC.hpp"
+// Capacitive touch sensing:
+#include "Touch.hpp"
 // PID controller:
 #include "Controller.hpp"
 // Configuration of PWM and Timer2/0 for driving the motor:
@@ -15,14 +17,13 @@
 #include <Arduino_Helpers.h> // EMA.hpp
 #include <Wire.h>            // I²C slave
 
-#include "SMA.hpp"
+#include "SMA.hpp"            // SMA filter
 #include <AH/Filters/EMA.hpp> // EMA filter
 
 // ------------------------------ Description ------------------------------- //
 
-// This sketch drives up to four motorized fader using a PID controller. It
-// follows a reference trajectory defined in `Reference.hpp`. The motor is
-// disabled when the user touches the knob of the fader.
+// This sketch drives up to four motorized faders using a PID controller. The
+// motor is disabled when the user touches the knob of the fader.
 //
 // Everything is driven by Timer2, which runs (by default) at a rate of
 // 31.250 kHz. This high rate is used to eliminate audible tones from the PWM
@@ -33,39 +34,46 @@
 // in the Timer2 interrupt handler. The “touched” status is sticky for >20 ms
 // to prevent interference from the 50 Hz mains.
 //
-// There are options to follow a test reference (with ramps and jumps), to
-// receive a target position over I²C, or to run experiments based on commands
-// from the serial port. The latter is used by a Python script that performs
-// experiments with different tuning parameters for the controllers.
+// There are options to (1) follow a test reference (with ramps and jumps), (2)
+// to receive a target position over I²C, or (3) to run experiments based on
+// commands received over the serial port. The latter is used by a Python script
+// that performs experiments with different tuning parameters for the
+// controllers.
 
 // -------------------------------- Hardware -------------------------------- //
 
 // Fader 0:
-// - A0:  wiper of the potentiometer          (ADMUX0)
-// - D8:  touch pin of the knob               (PB0)
-// - D2:  input 1A of L293D dual H-bridge 1   (PD2)
-// - D3:  input 2A of L293D dual H-bridge 1   (OC2B)
+//  - A0:  wiper of the potentiometer          (ADC0)
+//  - D8:  touch pin of the knob               (PB0)
+//  - D2:  input 1A of L293D dual H-bridge 1   (PD2)
+//  - D3:  input 2A of L293D dual H-bridge 1   (OC2B)
 //
 // Fader 1:
-// - A1:  wiper of the potentiometer          (ADMUX1)
-// - D9:  touch pin of the knob               (PB1)
-// - D13: input 3A of L293D dual H-bridge 1   (PB5)
-// - D11: input 4A of L293D dual H-bridge 1   (OC2A)
+//  - A1:  wiper of the potentiometer          (ADC1)
+//  - D9:  touch pin of the knob               (PB1)
+//  - D13: input 3A of L293D dual H-bridge 1   (PB5)
+//  - D11: input 4A of L293D dual H-bridge 1   (OC2A)
 //
 // Fader 2:
-// - A2:  wiper of the potentiometer          (ADMUX2)
-// - D10: touch pin of the knob               (PB2)
-// - D4:  input 1A of L293D dual H-bridge 2   (PD4)
-// - D5:  input 2A of L293D dual H-bridge 2   (OC0B)
+//  - A2:  wiper of the potentiometer          (ADC2)
+//  - D10: touch pin of the knob               (PB2)
+//  - D4:  input 1A of L293D dual H-bridge 2   (PD4)
+//  - D5:  input 2A of L293D dual H-bridge 2   (OC0B)
 //
 // Fader 3:
-// - A3:  wiper of the potentiometer          (ADMUX3)
-// - D12: touch pin of the knob               (PB4)
-// - D7:  input 3A of L293D dual H-bridge 2   (PD7)
-// - D6:  input 4A of L293D dual H-bridge 2   (OC0A)
+//  - A3:  wiper of the potentiometer          (ADC3)
+//  - D12: touch pin of the knob               (PB4)
+//  - D7:  input 3A of L293D dual H-bridge 2   (PD7)
+//  - D6:  input 4A of L293D dual H-bridge 2   (OC0A)
 //
 // If fader 1 is unused:
-// - D13: sLED or scope as overrun indicator  (PB5)
+//  - D13: LED or scope as overrun indicator   (PB5)
+//
+// For communication:
+//  - D0:  UART TX                             (TXD)
+//  - D1:  UART RX                             (RXD)
+//  - A4:  I²C data                            (SDA)
+//  - A5:  I²C clock                           (SCL)
 //
 // Connect the outer connections of the potentiometers to ground and Vcc, it's
 // recommended to add a 100 nF capacitor between each wiper and ground.
@@ -74,75 +82,115 @@
 // On an Arduino Nano, you can set an option to use pins A6/A7 instead of A2/A3.
 // Note that D13 is often pulsed by the bootloader, which might cause the fader
 // to move when resetting the Arduino. You can either disable this behavior in
-// the bootloader, or use a different pin.
+// the bootloader, or use a different pin (e.g. A3 or A4 on an Arduino Nano).
+// The overrun indicator is only enabled if the number of faders is 1, because
+// it conflicts with the motor driver pin of Fader 1. You can choose a different
+// pin instead.
 
 // ----------------------------- Configuration ------------------------------ //
 
-// Print the control loop and interrupt frequencies to Serial at startup:
-constexpr bool print_frequencies = true;
-// Print the setpoint, actual position and control signal to Serial.
-// Note that this slows down the control loop significantly, it probably won't
-// work if you are using more than one fader without increasing
-// `interrupt_counter`.
-constexpr bool print_controller_signals = false;
-constexpr uint8_t controller_to_print = 0;
-// Actually drive the motors:
-constexpr bool enable_controller = true;
-// Follow the test reference trajectory (true) or receive the target position
-// over I²C (false):
-constexpr bool test_reference = false;
-// Allow control for tuning and starting experiments over Serial:
-constexpr bool serial_control = true;
-// Use analog pins (A0, A1, A6, A7) instead of (A0, A1, A2, A3), useful for
-// saving digital pins on an Arduino Nano:
-constexpr bool use_A6_A7 = false;
-// Number of faders, must be between 1 and 4:
-constexpr size_t num_faders = 1;
-// Use phase-correct PWM (true) or fast PWM (false), this determines the timer
-// interrupt frequency, prefer phase-correct PWM with prescaler 1 on 16 MHz
-// boards, and fast PWM with prescaler 1 on 8 MHz boards, both result in a PWM
-// and interrupt frequency of 31.250 kHz (fast PWM is twice as fast):
-constexpr bool phase_correct_pwm = true;
-// The fader position will be sampled once per `interrupt_counter` timer
-// interrupts, this determines the sampling frequency of the control loop:
-constexpr uint8_t interrupt_counter = 60 / (1 + phase_correct_pwm);
-// The prescaler for the timer, affects PWM and control loop frequencies:
-constexpr unsigned prescaler_fac = 1;
-// The prescaler for the ADC, affects speed of analog readings:
-constexpr uint8_t adc_prescaler_fac = 64;
-// Turn off the motor after this many seconds of inactivity:
-constexpr float timeout = 2;
-// EMA filter factor for fader position filters:
-constexpr uint8_t ema_K = 2;
-// SMA filter length for setpoint filters, improves tracking of ramps if the
-// setpoint changes in steps (e.g. when the DAW only updates the reference every
-// 20 ms). Powers of two are significantly faster:
-constexpr uint8_t setpoint_sma_length = 32;
+struct Config {
+    // Print the control loop and interrupt frequencies to Serial at startup:
+    static constexpr bool print_frequencies = true;
+    // Print the setpoint, actual position and control signal to Serial.
+    // Note that this slows down the control loop significantly, it probably
+    // won't work if you are using more than one fader without increasing
+    // `interrupt_counter`:
+    static constexpr bool print_controller_signals = false;
+    static constexpr uint8_t controller_to_print = 0;
+    // Follow the test reference trajectory (true) or receive the target
+    // position over I²C or Serial (false):
+    static constexpr bool test_reference = false;
+    // Allow control for tuning and starting experiments over Serial:
+    static constexpr bool serial_control = true;
+    // I²C slave address (zero to disable I²C):
+    static constexpr uint8_t i2c_address = 8;
 
-// -------------------------- Computed Quantities --------------------------- //
+    // Number of faders, must be between 1 and 4:
+    static constexpr size_t num_faders = 1;
+    // Actually drive the motors:
+    static constexpr bool enable_controller = true;
+    // Use analog pins (A0, A1, A6, A7) instead of (A0, A1, A2, A3), useful for
+    // saving digital pins on an Arduino Nano:
+    static constexpr bool use_A6_A7 = true;
+    // Use pin A2 instead of D13 as the motor driver pin for the second fader.
+    // Can only be used if `use_A6_A7` is set to true:
+    static constexpr bool fader_1_A2 = true;
 
-constexpr auto prescaler0 = factorToTimer0Prescaler(prescaler_fac);
-static_assert(prescaler0 != Timer0Prescaler::Invalid, "Invalid prescaler");
-constexpr auto prescaler2 = factorToTimer2Prescaler(prescaler_fac);
-static_assert(prescaler2 != Timer2Prescaler::Invalid, "Invalid prescaler");
-constexpr float Ts = 1. * prescaler_fac * interrupt_counter * 256 *
-                     (1 + phase_correct_pwm) / F_CPU;
-constexpr float interrupt_freq =
-    1. * F_CPU / prescaler_fac / 256 / (1 + phase_correct_pwm);
-constexpr auto adc_prescaler = factorToADCPrescaler(adc_prescaler_fac);
-static_assert(adc_prescaler != ADCPrescaler::Invalid, "Invalid prescaler");
-constexpr float adc_freq = 1. * F_CPU / adc_prescaler_fac;
-constexpr bool enable_overrun_indicator = num_faders < 2;
+    // Capacitive touch sensing RC time threshold.
+    // Increase this time constant if the capacitive touch sense is too
+    // sensitive or decrease it if it's not sensitive enough:
+    static constexpr float touch_rc_time_threshold = 150e-6; // seconds
+    // Bit masks of the touch pins (must be on port B):
+    static constexpr uint8_t touch_masks[] = {1 << PB0, 1 << PB1, 1 << PB2,
+                                              1 << PB4};
 
-// --------------------- ADC and Capacitive Touch State --------------------- //
+    // Use phase-correct PWM (true) or fast PWM (false), this determines the
+    // timer interrupt frequency, prefer phase-correct PWM with prescaler 1 on
+    // 16 MHz boards, and fast PWM with prescaler 1 on 8 MHz boards, both result
+    // in a PWM and interrupt frequency of 31.250 kHz
+    // (fast PWM is twice as fast):
+    static constexpr bool phase_correct_pwm = true;
+    // The fader position will be sampled once per `interrupt_counter` timer
+    // interrupts, this determines the sampling frequency of the control loop.
+    // Some examples include 20 → 320 µs, 30 → 480 µs, 60 → 960 µs,
+    // 90 → 1,440 µs, 124 → 2,016 µs, 188 → 3,008 µs, 250 → 4,000 µs.
+    // 60 is the default, because it works with four faders. If you only use
+    // a single fader, you can go as low as 20 because you only need a quarter
+    // of the computations and ADC time:
+    static constexpr uint8_t interrupt_counter = 60 / (1 + phase_correct_pwm);
+    // The prescaler for the timer, affects PWM and control loop frequencies:
+    static constexpr unsigned prescaler_fac = 1;
+    // The prescaler for the ADC, affects speed of analog readings:
+    static constexpr uint8_t adc_prescaler_fac = 64;
 
-uint16_t ADCReadManual(uint8_t idx);
-volatile int16_t adcvals[num_faders]; // Latest ADC reading (updated in ADC ISR)
-EMA<ema_K, uint16_t> filters[num_faders]; // Filters for ADC readings
-uint16_t filtered_adcvals[num_faders];    // Filtered ADC readings
+    // Turn off the motor after this many seconds of inactivity:
+    static constexpr float timeout = 2;
 
-void touchBegin();
-volatile bool touched[num_faders]; // Whether the knobs are being touched
+    // EMA filter factor for fader position filters:
+    static constexpr uint8_t adc_ema_K = 2;
+    // SMA filter length for setpoint filters, improves tracking of ramps if the
+    // setpoint changes in steps (e.g. when the DAW only updates the reference
+    // every 20 ms). Powers of two are significantly faster (e.g. 32 works well):
+    static constexpr uint8_t setpoint_sma_length = 0;
+
+    // ------------------------ Computed Quantities ------------------------- //
+
+    // Sampling time of control loop:
+    constexpr static float Ts = 1. * Config::prescaler_fac *
+                                Config::interrupt_counter * 256 *
+                                (1 + Config::phase_correct_pwm) / F_CPU;
+    // Frequency at which the interrupt fires:
+    constexpr static float interrupt_freq = 1. * F_CPU / Config::prescaler_fac /
+                                            256 /
+                                            (1 + Config::phase_correct_pwm);
+    // Clock speed of the ADC:
+    constexpr static float adc_clock_freq =
+        1. * F_CPU / Config::adc_prescaler_fac;
+    // Pulse pin D13 if the control loop took too long:
+    constexpr static bool enable_overrun_indicator =
+        Config::num_faders < 2 || fader_1_A2;
+
+    static_assert(use_A6_A7 || !fader_1_A2,
+                  "Cannot use A2 for motor driver "
+                  "and analog input at the same time");
+};
+constexpr uint8_t Config::touch_masks[];
+
+constexpr float Ts = Config::Ts;
+
+// ----------------- ADC, Capacitive Touch State and Motors ----------------- //
+
+ADCManager<Config> adc;
+TouchSense<Config> touch;
+Motors<Config> motors;
+
+// ------------------------ Setpoints and References ------------------------ //
+
+// Reference speed for tuning experiments:
+float serial_experiment_speed[Config::num_faders];
+// Setpoints (target positions) for all faders (updated in I²C interrupt):
+volatile int16_t setpoints[Config::num_faders];
 
 // ------------------------------ Controllers ------------------------------- //
 
@@ -183,21 +231,17 @@ PID controllers[] {
     },
 };
 
-// Tuning experiments:
-float serial_experiment_speed[num_faders];
-// Setpoints (target positions) for all faders (updated in I²C interrupt):
-volatile int16_t setpoints[num_faders];
-
 template <uint8_t Idx>
 void printControllerSignals(int16_t setpoint, int16_t adcval, int16_t control) {
     // Send (binary) controller signals over Serial to plot in Python
-    if (serial_control && serial_experiment_speed[Idx] > 0) {
+    if (Config::serial_control && serial_experiment_speed[Idx] > 0) {
         const int16_t data[3] {setpoint, adcval, control};
         SLIPSender(Serial).writePacket(reinterpret_cast<const uint8_t *>(data),
                                        sizeof(data));
     }
     // Print signals as text
-    else if (print_controller_signals && Idx == controller_to_print) {
+    else if (Config::print_controller_signals &&
+             Idx == Config::controller_to_print) {
         Serial.print(setpoint);
         Serial.print('\t');
         Serial.print(adcval);
@@ -215,9 +259,9 @@ void updateController(uint16_t setpoint, int16_t adcval, bool touched) {
     if (touched) controller.resetActivityCounter();
 
     // Set the target position
-    if (setpoint_sma_length > 0) {
-        static SMA<setpoint_sma_length, uint16_t, uint32_t> setpointfilt;
-        uint16_t filtsetpoint = setpointfilt(setpoint);
+    if (Config::setpoint_sma_length > 0) {
+        static SMA<Config::setpoint_sma_length, uint16_t, uint32_t> sma;
+        uint16_t filtsetpoint = sma(setpoint);
         controller.setSetpoint(filtsetpoint);
     } else {
         controller.setSetpoint(setpoint);
@@ -227,13 +271,11 @@ void updateController(uint16_t setpoint, int16_t adcval, bool touched) {
     int16_t control = controller.update(adcval);
 
     // Apply the control action to the motor
-    if (enable_controller) {
+    if (Config::enable_controller) {
         if (touched) // Turn off motor if knob is touched
-            Motor<Idx>::forward(0);
-        else if (control >= 0)
-            Motor<Idx>::forward(control);
+            motors.setSpeed<Idx>(0);
         else
-            Motor<Idx>::backward(-control);
+            motors.setSpeed<Idx>(control);
     }
 
     printControllerSignals<Idx>(controller.getSetpoint(), adcval, control);
@@ -241,199 +283,97 @@ void updateController(uint16_t setpoint, int16_t adcval, bool touched) {
 
 template <uint8_t Idx>
 void readAndUpdateController() {
-    int16_t adcval, setpoint;
     // Read the ADC value for the given fader:
-    ATOMIC_BLOCK(ATOMIC_FORCEON) { adcval = ::adcvals[Idx]; }
+    int16_t adcval = adc.read(Idx);
     // If the ADC value was updated by the ADC interrupt, run the control loop:
     if (adcval >= 0) {
         // Check if the fader knob is touched
-        bool touched = ::touched[Idx];
+        bool touched = touch.read(Idx);
         // Read the target position
-        if (test_reference)
-            // from the test reference
-            setpoint = getNextSetpoint<Idx>(16);
-        else if (serial_control && serial_experiment_speed[Idx] > 0)
+        uint16_t setpoint;
+
+        if (Config::serial_control && serial_experiment_speed[Idx] > 0)
             // from the tuning experiment reference
             setpoint =
                 getNextExperimentSetpoint<Idx>(serial_experiment_speed[Idx]);
+        else if (Config::test_reference)
+            // from the test reference
+            setpoint = getNextSetpoint<Idx>(4);
         else
             // from the I²C master
             ATOMIC_BLOCK(ATOMIC_FORCEON) { setpoint = ::setpoints[Idx]; }
         updateController<Idx>(setpoint, adcval, touched);
         // Write -1 so the controller doesn't run again until the next value is
         // available:
-        ATOMIC_BLOCK(ATOMIC_FORCEON) { ::adcvals[Idx] = -1; }
-        if (enable_overrun_indicator) cbi(PORTB, 5); // Clear overrun indicator
+        adc.write(Idx, -1);
+        if (Config::enable_overrun_indicator)
+            cbi(PORTB, 5); // Clear overrun indicator
     }
 }
 
 // ------------------------------ Setup & Loop ------------------------------ //
 
+void onRequest();
+void onReceive(int);
+void updateSerialIn();
+
 void setup() {
     // Initialize some globals
-    for (uint8_t i = 0; i < num_faders; ++i) {
-        adcvals[i] = -1;
-        filtered_adcvals[i] = ADCReadManual(i);
-        filters[i].reset(filtered_adcvals[i]);
-        controllers[i].setActivityTimeout(timeout);
+    for (uint8_t i = 0; i < Config::num_faders; ++i) {
+        // all fader positions for the control loop start of as -1 (no reading)
+        adc.write(i, -1);
+        // reset the filter to the current fader position to prevent transients
+        adc.writeFiltered(i, analogRead(adc.channel_index_to_mux_address(i)));
+        // after how many seconds of not touching the fader and not changing
+        // the reference do we turn off the motor?
+        controllers[i].setActivityTimeout(Config::timeout);
     }
 
     // Configure the hardware
-    if (print_frequencies || print_controller_signals || serial_control)
+    if (Config::print_frequencies || Config::print_controller_signals ||
+        Config::serial_control)
         Serial.begin(1000000);
 
-    setupADC(adc_prescaler);
-    if (num_faders > 0) setupMotorTimer2(phase_correct_pwm, prescaler2);
-    if (num_faders > 2) setupMotorTimer0(phase_correct_pwm, prescaler0);
+    if (Config::enable_overrun_indicator) sbi(DDRB, 5); // Pin 13 output
 
-    ATOMIC_BLOCK(ATOMIC_FORCEON) {
-        if (enable_overrun_indicator) sbi(DDRB, 5); // Pin 13 output
+    adc.begin();
+    touch.begin();
+    motors.begin();
 
-        if (num_faders > 0) Motor<0>::begin();
-        if (num_faders > 1) Motor<1>::begin();
-        if (num_faders > 2) Motor<2>::begin();
-        if (num_faders > 3) Motor<3>::begin();
-
-        touchBegin();
-    }
-
-    if (print_frequencies) {
+    if (Config::print_frequencies) {
+        Serial.println();
         Serial.print(F("Interrupt frequency (Hz): "));
-        Serial.println(interrupt_freq);
+        Serial.println(Config::interrupt_freq);
         Serial.print(F("Controller sampling time (µs): "));
-        Serial.println(Ts * 1e6);
+        Serial.println(Config::Ts * 1e6);
+        Serial.print(F("ADC clock rate (Hz): "));
+        Serial.println(Config::adc_clock_freq);
+        Serial.print(F("ADC sampling rate (Sps): "));
+        Serial.println(adc.adc_rate);
     }
-    if (print_controller_signals) {
-        Serial.println(F("\r\nReference\tActual\tControl\t-"));
+    if (Config::print_controller_signals) {
+        Serial.println();
+        Serial.println(F("Reference\tActual\tControl\t-"));
         Serial.println(F("0\t0\t0\t0\r\n0\t0\t0\t1024"));
     }
 
     // Initalize I²C slave and attach callbacks
-    Wire.begin(8);
-    void onRequest();
-    void onReceive(int);
-    Wire.onRequest(onRequest);
-    Wire.onReceive(onReceive);
+    if (Config::i2c_address) {
+        Wire.begin(Config::i2c_address);
+        Wire.onRequest(onRequest);
+        Wire.onReceive(onReceive);
+    }
 
     // Enable Timer2 overflow interrupt
     sbi(TIMSK2, TOIE2);
 }
 
 void loop() {
-    if (num_faders > 0) readAndUpdateController<0>();
-    if (num_faders > 1) readAndUpdateController<1>();
-    if (num_faders > 2) readAndUpdateController<2>();
-    if (num_faders > 3) readAndUpdateController<3>();
-    void updateSerialIn();
-    if (serial_control) updateSerialIn();
-}
-
-// ---------------------------- Capacitive Touch ---------------------------- //
-
-// Increase this time constant if the capacitive touch sense is too sensitive or
-// decrease it if it's not sensitive enough:
-constexpr float rc_time_untouched = 100e-6; // seconds
-
-// Compute the actual threshold as a number of interrupts:
-constexpr uint8_t touch_sense_thres = interrupt_freq * rc_time_untouched * 2;
-// Ignore mains noise by making the “touched” status stick for longer than the
-// mains period:
-constexpr float period_50Hz = 1. / 50;
-constexpr uint8_t touch_sense_stickiness =
-    interrupt_freq * period_50Hz * 6 / interrupt_counter;
-
-static_assert(touch_sense_thres < interrupt_counter, "Threshold too high");
-
-// Masks of the touch pins (all on port B):
-constexpr uint8_t touch_masks[] = {
-    1 << PB0,
-    1 << PB1,
-    1 << PB2,
-    1 << PB4,
-};
-constexpr uint8_t touch_mask = (num_faders > 0 ? touch_masks[0] : 0) |
-                               (num_faders > 1 ? touch_masks[1] : 0) |
-                               (num_faders > 2 ? touch_masks[2] : 0) |
-                               (num_faders > 3 ? touch_masks[3] : 0);
-
-void touchBegin() {
-    PORTB &= ~touch_mask; // low
-    DDRB |= touch_mask;   // output mode
-}
-
-// 0. The pin mode is “output”, the value is “low”.
-// 1. Set the pin mode to “input”, touch_timer = 0.
-// 2. The pin will start charging through the external pull-up resistor.
-// 3. After a fixed amount of time, check whether the pin became “high”:
-//    if this is the case, the RC-time of the knob/pull-up resistor circuit
-//    was smaller than the given threshold. Since R is fixed, this can be used
-//    to infer C, the capacitance of the knob: if the capacitance is lower than
-//    the threshold (i.e. RC-time is lower), this means the knob was not touched.
-// 5. Set the pin mode to “output”, to start discharging the pin to 0V again.
-// 6. Some time later, the pin has discharged, so switch to “input” mode and
-//    start charging again for the next RC-time measurement.
-//
-// The “touched” status is sticky: it will remain set for at least
-// touch_sense_stickiness ticks. If the pin never resulted in another “touched”
-// measurement during that period, the “touched” status for that pin is cleared.
-
-// Check which touch sensing knobs are being touched.
-void touchSample(uint8_t counter) {
-    static uint8_t touch_timers[num_faders] {};
-    if (counter == 0) {
-        DDRB &= ~touch_mask; // input mode, start charging
-    } else if (counter == touch_sense_thres) {
-        uint8_t touched_bits = PINB;
-        DDRB |= touch_mask; // output mode, start discharging
-        for (uint8_t i = 0; i < num_faders; ++i) {
-            bool touch_i = (touched_bits & touch_masks[i]) == 0;
-            if (touch_i) {
-                touch_timers[i] = touch_sense_stickiness;
-                touched[i] = true;
-            } else if (touch_timers[i] > 0) {
-                --touch_timers[i];
-                if (touch_timers[i] == 0) touched[i] = false;
-            }
-        }
-    }
-}
-
-// ---------------------------------- ADC ----------------------------------- //
-
-volatile uint8_t adc_mux_idx = num_faders;
-
-constexpr uint8_t adc_mux_idx_to_mux_address(uint8_t adc_mux_idx) {
-    return use_A6_A7 ? (adc_mux_idx < 2 ? adc_mux_idx : adc_mux_idx + 4)
-                     : adc_mux_idx;
-}
-
-void ADCStartConversion(uint8_t channel) {
-    adc_mux_idx = channel;
-    ADMUX &= 0xF0;
-    ADMUX |= adc_mux_idx_to_mux_address(channel);
-    sbi(ADCSRA, ADSC); // Start conversion
-}
-
-constexpr uint8_t adc_start_count = interrupt_counter / num_faders;
-constexpr float adc_rate = interrupt_freq / adc_start_count;
-// Check that this doesn't take more time than the 13 ADC clock cycles it takes
-// to actually do the conversion.
-static_assert(adc_rate <= adc_freq / 14, "ADC too slow");
-
-// Start an ADC conversion at the right intervals.
-void ADCSample(uint8_t counter) {
-    if (num_faders > 0 && counter == 0 * adc_start_count)
-        ADCStartConversion(0);
-    else if (num_faders > 1 && counter == 1 * adc_start_count)
-        ADCStartConversion(1);
-    else if (num_faders > 2 && counter == 2 * adc_start_count)
-        ADCStartConversion(2);
-    else if (num_faders > 3 && counter == 3 * adc_start_count)
-        ADCStartConversion(3);
-}
-
-uint16_t ADCReadManual(uint8_t idx) {
-    return analogRead(adc_mux_idx_to_mux_address(idx));
+    if (Config::num_faders > 0) readAndUpdateController<0>();
+    if (Config::num_faders > 1) readAndUpdateController<1>();
+    if (Config::num_faders > 2) readAndUpdateController<2>();
+    if (Config::num_faders > 3) readAndUpdateController<3>();
+    if (Config::serial_control) updateSerialIn();
 }
 
 // ------------------------------- Interrupts ------------------------------- //
@@ -444,35 +384,29 @@ ISR(TIMER2_OVF_vect) {
     // know when to take what actions.
     static uint8_t counter = 0;
 
-    ADCSample(counter);
-    touchSample(counter);
+    adc.update(counter);
+    touch.update(counter);
 
     ++counter;
-    if (counter == interrupt_counter) counter = 0;
+    if (counter == Config::interrupt_counter) counter = 0;
 }
 
 // Fires when the ADC measurement is complete. Stores the reading, both before
 // and after filtering (for the controller and for user input respectively).
-ISR(ADC_vect) {
-    if (enable_overrun_indicator && adcvals[adc_mux_idx] >= 0)
-        sbi(PORTB, 5);     // Set overrun indicator
-    uint16_t result = ADC; // Store ADC reading
-    adcvals[adc_mux_idx] = result;
-    filtered_adcvals[adc_mux_idx] = filters[adc_mux_idx](result << (6 - ema_K));
-}
+ISR(ADC_vect) { adc.complete(); }
 
 // ---------------------------------- Wire ---------------------------------- //
 
 // Send the touch status and filtered fader positions to the master.
 void onRequest() {
-    uint8_t touch = 0;
-    if (num_faders > 0) touch |= touched[0] << 0;
-    if (num_faders > 1) touch |= touched[1] << 1;
-    if (num_faders > 2) touch |= touched[2] << 2;
-    if (num_faders > 3) touch |= touched[3] << 3;
-    Wire.write(touch);
-    for (uint8_t i = 0; i < num_faders; ++i)
-        Wire.write(reinterpret_cast<const uint8_t *>(&filtered_adcvals[i]), 2);
+    uint8_t touched = 0;
+    for (uint8_t i = 0; i < Config::num_faders; ++i)
+        touched |= touch.touched[i] << i;
+    Wire.write(touched);
+    for (uint8_t i = 0; i < Config::num_faders; ++i) {
+        uint16_t filt_read = adc.filtered_readings[i];
+        Wire.write(reinterpret_cast<const uint8_t *>(&filt_read), 2);
+    }
 }
 
 // Change the setpoint of the given fader based on the value in the message
@@ -484,10 +418,7 @@ void onReceive(int count) {
     data |= uint16_t(Wire.read()) << 8;
     uint8_t idx = data >> 12;
     data &= 0x03FF;
-    if (num_faders > 0 && idx == 0) setpoints[0] = data;
-    if (num_faders > 1 && idx == 1) setpoints[1] = data;
-    if (num_faders > 2 && idx == 2) setpoints[2] = data;
-    if (num_faders > 3 && idx == 3) setpoints[3] = data;
+    if (idx < Config::num_faders) setpoints[idx] = data;
 }
 
 // ---------------------------------- Serial -------------------------------- //
@@ -508,20 +439,21 @@ void onReceive(int count) {
 //
 // For example the message 'c0\x00\x00\x20\x42' sets the derivative filter
 // cutoff frequency of the first fader to 40.
+
 void updateSerialIn() {
     static SLIPParser parser;
     static char cmd = '\0';
     static uint8_t fader_idx = 0;
     static uint8_t buf[4];
     static_assert(sizeof(buf) == sizeof(float), "");
-    // Function is called if a new byte of the message arrives:
-    auto on_char_receive = [&](char c, size_t c_idx) {
-        if (c_idx == 0) {
-            cmd = c;
-        } else if (c_idx == 1) {
-            fader_idx = c - '0';
-        } else if (c_idx < 6) {
-            buf[c_idx - 2] = c;
+    // This function is called if a new byte of the message arrives:
+    auto on_char_receive = [&](char new_byte, size_t index_in_packet) {
+        if (index_in_packet == 0) {
+            cmd = new_byte;
+        } else if (index_in_packet == 1) {
+            fader_idx = new_byte - '0';
+        } else if (index_in_packet < 6) {
+            buf[index_in_packet - 2] = new_byte;
         }
     };
     // Convert the 4-byte buffer to a float:
@@ -534,7 +466,10 @@ void updateSerialIn() {
     while (Serial.available() > 0) {
         uint8_t c = Serial.read();
         auto msg_size = parser.parse(c, on_char_receive);
-        if (msg_size == 6 && fader_idx < num_faders) {
+        // If a complete message of 6 bytes was received, and if it addresses
+        // a valid fader:
+        if (msg_size == 6 && fader_idx < Config::num_faders) {
+            // Execute the command:
             switch (cmd) {
                 case 'p': controllers[fader_idx].setKp(as_f32()); break;
                 case 'i': controllers[fader_idx].setKi(as_f32()); break;
