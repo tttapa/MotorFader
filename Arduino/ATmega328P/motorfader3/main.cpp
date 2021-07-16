@@ -157,19 +157,16 @@ struct Config {
     // ------------------------ Computed Quantities ------------------------- //
 
     // Sampling time of control loop:
-    constexpr static float Ts = 1. * Config::prescaler_fac *
-                                Config::interrupt_counter * 256 *
-                                (1 + Config::phase_correct_pwm) / F_CPU;
+    constexpr static float Ts = 1. * prescaler_fac * interrupt_counter * 256 *
+                                (1 + phase_correct_pwm) / F_CPU;
     // Frequency at which the interrupt fires:
-    constexpr static float interrupt_freq = 1. * F_CPU / Config::prescaler_fac /
-                                            256 /
-                                            (1 + Config::phase_correct_pwm);
+    constexpr static float interrupt_freq =
+        1. * F_CPU / prescaler_fac / 256 / (1 + phase_correct_pwm);
     // Clock speed of the ADC:
-    constexpr static float adc_clock_freq =
-        1. * F_CPU / Config::adc_prescaler_fac;
+    constexpr static float adc_clock_freq = 1. * F_CPU / adc_prescaler_fac;
     // Pulse pin D13 if the control loop took too long:
     constexpr static bool enable_overrun_indicator =
-        Config::num_faders < 2 || fader_1_A2;
+        num_faders < 2 || fader_1_A2;
 
     static_assert(use_A6_A7 || !fader_1_A2,
                   "Cannot use A2 for motor driver "
@@ -364,7 +361,9 @@ void setup() {
         Wire.onReceive(onReceive);
     }
 
-    // Enable Timer2 overflow interrupt
+    // Enable Timer2 overflow interrupt, this starts reading the touch sensitive
+    // knobs and sampling the ADC, which causes the controllers to run in the
+    // main loop
     sbi(TIMSK2, TOIE2);
 }
 
