@@ -17,6 +17,24 @@ constexpr inline float horner(float x, float a, const float (&p)[N]) {
     return horner_impl(x - a, p, N - 2, p[N - 1]);
 }
 
+/// Compute the weight factor of a exponential moving average filter
+/// with the given cutoff frequency.
+/// @see https://tttapa.github.io/Pages/Mathematics/Systems-and-Control-Theory/Digital-filters/Exponential%20Moving%20Average/Exponential-Moving-Average.html#cutoff-frequency
+///      for the formula.
+inline float calcAlphaEMA(float f_n) {
+    // Taylor coefficients of
+    // α(fₙ) = cos(2πfₙ) - 1 + √( cos(2πfₙ)² - 4 cos(2πfₙ) + 3 )
+    // at fₙ = 0.25
+    constexpr static float coeff[] {
+        +7.3205080756887730e-01, +9.7201214975728490e-01,
+        -3.7988125051760377e+00, +9.5168450173968860e+00,
+        -2.0829320344443730e+01, +3.0074306603814595e+01,
+        -1.6446172139457754e+01, -8.0756002564633450e+01,
+        +3.2420501524111750e+02, -6.5601870948443250e+02,
+    };
+    return horner(f_n, 0.25, coeff);
+}
+
 /// Standard PID (proportional, integral, derivative) controller. Derivative
 /// component is filtered using an exponential moving average filter.
 class PID {
@@ -34,7 +52,7 @@ class PID {
     ///         Cutoff frequency of derivative EMA filter (Hertz),
     ///         zero to disable the filter entirely
     PID(float kp, float ki, float kd, float Ts, float f_c = 0,
-        float maxOutput = 255.f)
+        float maxOutput = 255)
         : Ts(Ts), maxOutput(maxOutput) {
         setKp(kp);
         setKi(ki);
@@ -71,8 +89,11 @@ class PID {
             errThres = 1;
         }
 
+        bool backward = false;
+        int32_t calcIntegral = backward ? newIntegral : integral;
+
         // Standard PID rule
-        float output = kp * error + ki_Ts * newIntegral + kd_Ts * diff;
+        float output = kp * error + ki_Ts * calcIntegral + kd_Ts * diff;
 
         // Clamp and anti-windup
         if (output > maxOutput)
@@ -93,29 +114,13 @@ class PID {
     float getKi() const { return ki_Ts / Ts; } ///< Integral gain
     float getKd() const { return kd_Ts * Ts; } ///< Derivative gain
 
-    /// Compute the weight factor of a exponential moving average filter
-    /// with the given cutoff frequency.
-    /// @see https://tttapa.github.io/Pages/Mathematics/Systems-and-Control-Theory/Digital-filters/Exponential%20Moving%20Average/Exponential-Moving-Average.html#cutoff-frequency
-    ///      for the formula.
-    float calcAlphaEMA(float f_c) const {
-        // Taylor coefficients of
-        // α(fₙ) = cos(2πfₙ) - 1 + √( cos(2πfₙ)² - 4 cos(2πfₙ) + 3 )
-        // at fₙ = 0.25
-        constexpr static float coeff[] {
-            +7.3205080756887730e-01, +9.7201214975728490e-01,
-            -3.7988125051760377e+00, +9.5168450173968860e+00,
-            -2.0829320344443730e+01, +3.0074306603814595e+01,
-            -1.6446172139457754e+01, -8.0756002564633450e+01,
-            +3.2420501524111750e+02, -6.5601870948443250e+02,
-        };
-        float f_n = f_c * Ts; // normalized sampling frequency
-        return f_c == 0 ? 1 : horner(f_n, 0.25, coeff);
-    }
-
     /// Set the cutoff frequency (-3 dB point) of the exponential moving average
     /// filter that is applied to the input before taking the difference for
     /// computing the derivative term.
-    void setEMACutoff(float f_c) { emaAlpha = calcAlphaEMA(f_c); }
+    void setEMACutoff(float f_c) {
+        float f_n = f_c * Ts; // normalized sampling frequency
+        this->emaAlpha = f_c == 0 ? 1 : calcAlphaEMA(f_n);
+    }
 
     /// Set the reference/target/setpoint of the controller.
     void setSetpoint(uint16_t setpoint) {
@@ -139,7 +144,7 @@ class PID {
         if (s == 0)
             activityThres = 0;
         else
-            activityThres = s / Ts == 0 ? 1 : s / Ts;
+            activityThres = uint16_t(s / Ts) == 0 ? 1 : s / Ts;
     }
 
     /// Reset the sum of the previous errors to zero.
