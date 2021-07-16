@@ -116,12 +116,12 @@ inline void ADCManager<Config>::startConversion(uint8_t channel) {
 template <class Config>
 inline void ADCManager<Config>::complete() {
     if (Config::enable_overrun_indicator && readings[channel_index] >= 0)
-        sbi(PORTB, 5);     // Set overrun indicator
-    uint16_t result = ADC; // Store ADC reading
-    readings[channel_index] = result;
+        sbi(PORTB, 5);    // Set overrun indicator
+    uint16_t value = ADC; // Store ADC reading
+    readings[channel_index] = value;
     // Filter the reading
-    filtered_readings[channel_index] =
-        filters[channel_index](result << (6 - Config::adc_ema_K));
+    auto &filter = filters[channel_index];
+    filtered_readings[channel_index] = filter(value << (6 - Config::adc_ema_K));
 }
 
 template <class Config>

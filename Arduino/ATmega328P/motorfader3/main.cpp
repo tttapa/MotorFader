@@ -252,7 +252,7 @@ template <uint8_t Idx>
 void updateController(uint16_t setpoint, int16_t adcval, bool touched) {
     auto &controller = controllers[Idx];
 
-    // Prevent the motor from being turned off after begin touched
+    // Prevent the motor from being turned off after being touched
     if (touched) controller.resetActivityCounter();
 
     // Set the target position
